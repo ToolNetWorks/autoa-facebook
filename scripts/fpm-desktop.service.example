@@ -1,0 +1,15 @@
+[Unit]
+Description=Local-only Facebook Login Desktop (SSH tunnel)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/facebook-pipeline-manager
+ExecStart=/root/facebook-pipeline-manager/scripts/start_desktop.sh
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

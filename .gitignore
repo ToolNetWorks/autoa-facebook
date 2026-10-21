@@ -1,0 +1,59 @@
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+*.env.bak.*
+.env.bak.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data
+data/
+backups/
+*.sqlite3
+*.sqlite3-journal
+*.db
+*.log
+logs/
+
+# Browser / session artifacts
+*.cookies
+*.session
+.cookies/
+sessions/
+
+# Uploads and media artifacts
+uploads/
+*.mp4
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.pdf
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vite/
+
