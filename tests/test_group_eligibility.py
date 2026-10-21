@@ -11,7 +11,7 @@ from test_app import AuthClient, client  # noqa: F401 (fixture)
 
 import app as m
 from scheduler import job_allocator
-from services import group_eligibility, group_screening, group_verification
+from services import group_eligibility, group_membership, group_screening, group_verification
 from services.group_screening import (
     STATUS_FAILED, STATUS_NOT_ACCESSIBLE, STATUS_NOT_MEMBER, STATUS_PRIORITY, STATUS_REVIEW,
     STATUS_RESTRICTED, STATUS_UNKNOWN, classify,
@@ -141,9 +141,12 @@ def test_an_account_that_has_not_joined_is_not_eligible(client):
     with m.db() as conn:
         store_result(conn, pipeline, account, group, STATUS_NOT_MEMBER,
                      check_status="not_member", is_member=False, can_post=None)
+        # Tai khoan bi ro biet la chua tham gia group.
+        group_membership.record(conn, pipeline, account, group,
+                                group_membership.NOT_MEMBER)
         result = decision(conn, pipeline, account, group)
     assert result['eligible'] is False
-    assert result['status'] == group_verification.NOT_TESTED
+    assert result['decision'] == group_eligibility.WAITING_MEMBERSHIP
     assert 'tham gia' in result['reason'].lower()
 
 
@@ -225,7 +228,11 @@ def test_a_failed_check_does_not_block_the_pair_for_ever(client):
 
 # --- 9. group yêu cầu Admin duyệt bài ---------------------------------------
 
-def test_a_group_that_needs_approval_is_eligible(client):
+def test_a_group_that_needs_approval_is_not_auto_posted(client):
+    """Bài chờ quản trị group duyệt thì hệ thống không tự đăng vào đó.
+
+    Mỗi bài đều cần người duyệt, nên group đó do người dùng đăng tay.
+    """
     pipeline = make_pipeline(client, '@el9')
     account = make_account(client, pipeline, 'Facebook')
     group = make_group(client, pipeline, account, 'Group cần duyệt',
@@ -233,8 +240,9 @@ def test_a_group_that_needs_approval_is_eligible(client):
     with m.db() as conn:
         store_result(conn, pipeline, account, group, STATUS_REVIEW, requires_approval=True)
         result = decision(conn, pipeline, account, group)
-    assert result['eligible'] is True
+    assert result['eligible'] is False
     assert result['status'] == group_verification.PENDING_GROUP_APPROVAL
+    assert result['decision'] == group_eligibility.WAITING_APPROVAL
 
 
 # --- 10. group không hỗ trợ ẩn danh -----------------------------------------
@@ -301,8 +309,13 @@ def test_two_accounts_of_one_group_have_different_decisions(client):
         store_result(conn, pipeline, first, group, STATUS_PRIORITY)
         store_result(conn, pipeline, second, group, STATUS_NOT_MEMBER,
                      check_status="not_member", is_member=False, can_post=None)
-        assert decision(conn, pipeline, first, group)['eligible'] is True
-        assert decision(conn, pipeline, second, group)['eligible'] is False
+        first_decision = decision(conn, pipeline, first, group)
+        second_decision = decision(conn, pipeline, second, group)
+        assert first_decision['eligible'] is True
+        assert first_decision['decision'] == group_eligibility.VERIFIED_READY
+        # Facebook B chua tung co bang chung: chi duoc lam bai dau tien.
+        assert second_decision['status'] == group_verification.NOT_TESTED
+        assert second_decision['decision'] == group_eligibility.FIRST_POST_READY
 
 
 def test_the_state_of_one_account_is_never_used_for_another(client):
@@ -320,9 +333,9 @@ def test_the_state_of_one_account_is_never_used_for_another(client):
         # Chỉ Facebook A được kiểm tra và đạt.
         store_result(conn, pipeline, first, group, STATUS_PRIORITY)
         result = decision(conn, pipeline, second, group)
-    assert result['eligible'] is False
     assert result['status'] == group_verification.NOT_TESTED
-    assert 'chưa có bằng chứng' in result['reason'].lower()
+    assert result['decision'] == group_eligibility.FIRST_POST_READY
+    assert 'bài đầu tiên' in result['reason'].lower()
 
 
 def test_the_scheduler_serves_the_account_that_is_eligible(client):
@@ -342,7 +355,11 @@ def test_the_scheduler_serves_the_account_that_is_eligible(client):
             {"id": group, "pipeline_id": pipeline, "account_id": first, "label": "Group",
              "enabled": 1, "status": "active", "approved_target": 1, "posting_mode": "anonymous",
              "nickname": ""}])
-    assert [item["eligible_account_ids"] for item in eligible] == [[first]]
+    assert [item["eligible_account_ids"] for item in eligible] == [[first, second]]
+    # Tai khoan chua xac minh chi duoc lam bai dau tien, khong duoc xep lich lap lai.
+    with m.db() as conn:
+        second_decision = group_eligibility.pair_decision(conn, pipeline, second, group)
+    assert second_decision['recurring_eligible'] is False
 
 
 # --- 13. group đủ điều kiện nhưng Album chưa có ảnh READY -------------------

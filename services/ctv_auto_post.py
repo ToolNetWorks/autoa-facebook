@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     apply_to_new_accounts INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(pipeline_id, ctv_user_id)
+    UNIQUE(pipeline_id)
 )
 """
 
@@ -161,13 +161,16 @@ def _row_to_settings(row) -> dict:
 
 
 def settings_of(conn, pipeline_id: int, ctv_user_id: int) -> dict | None:
-    """Cấu hình đã lưu của một CTV, hoặc ``None`` nếu CTV chưa lưu lần nào.
+    """Cấu hình tự động đăng của Workspace, hoặc ``None`` nếu chưa lưu lần nào.
+
+    Một Workspace có đúng một CTV, nên Workspace chỉ có một cấu hình. ``ctv_user_id``
+    là người đã lưu cấu hình, dùng để truy vết.
 
     ``None`` và một cấu hình mặc định là hai trạng thái khác nhau: trạng thái
-    ``None`` nghĩa là chưa có hành động lưu nào của CTV.
+    ``None`` nghĩa là chưa có hành động lưu nào.
     """
-    row = conn.execute(f"SELECT * FROM {TABLE} WHERE pipeline_id=? AND ctv_user_id=?",
-                       (int(pipeline_id), int(ctv_user_id))).fetchone()
+    row = conn.execute(f"SELECT * FROM {TABLE} WHERE pipeline_id=?",
+                       (int(pipeline_id),)).fetchone()
     if row is None:
         return None
     return _row_to_settings(row)
@@ -205,44 +208,52 @@ def owner_of(conn, pipeline_id: int, ctv_user_id: int) -> dict | None:
 
 
 def list_configs(conn, pipeline_id: int) -> list[dict]:
-    """Cấu hình của mọi CTV trong Pipeline, dùng cho quản trị.
+    """Cấu hình tự động đăng của Workspace, dùng cho quản trị.
 
-    CTV chưa lưu cấu hình nào cũng có mặt trong danh sách, với
-    ``configured: false``, để quản trị thấy đủ ai chưa thiết lập.
+    Một Workspace có một CTV nên chỉ có một cấu hình. Nếu Workspace chưa lưu
+    cấu hình nào thì trả về một bản mặc định, để quản trị thấy rõ.
     """
     rows = conn.execute(f"""SELECT s.*, u.username, u.status user_status
                             FROM {TABLE} s JOIN users u ON u.id=s.ctv_user_id
                             WHERE s.pipeline_id=? ORDER BY u.username""",
                         (int(pipeline_id),)).fetchall()
-    saved = {}
+    if not rows:
+        owner = conn.execute("""SELECT u.id user_id, u.username, u.status user_status
+                                FROM pipeline_memberships m JOIN users u ON u.id=m.user_id
+                                WHERE m.pipeline_id=? AND m.status='active' AND u.role='ctv'
+                                ORDER BY u.username LIMIT 1""", (int(pipeline_id),)).fetchone()
+        settings = defaults_for(pipeline_id, int(owner["user_id"]) if owner else 0)
+        settings["username"] = owner["username"] if owner else ""
+        settings["user_status"] = owner["user_status"] if owner else ""
+        settings["configured"] = False
+        return [settings]
+    result = []
     for row in rows:
         settings = _row_to_settings(row)
         settings["username"] = row["username"]
         settings["user_status"] = row["user_status"]
         settings["configured"] = True
-        saved[int(row["ctv_user_id"])] = settings
-    members = conn.execute("""SELECT u.id user_id, u.username, u.status user_status
-                              FROM pipeline_memberships m JOIN users u ON u.id=m.user_id
-                              WHERE m.pipeline_id=? AND m.status='active' AND u.role='ctv'
-                              ORDER BY u.username""", (int(pipeline_id),)).fetchall()
-    result = []
-    for member in members:
-        user_id = int(member["user_id"])
-        if user_id in saved:
-            result.append(saved[user_id])
-            continue
-        settings = defaults_for(pipeline_id, user_id)
-        settings["username"] = member["username"]
-        settings["user_status"] = member["user_status"]
-        settings["configured"] = False
         result.append(settings)
     return result
 
 
+def list_collaborators(conn, pipeline_id: int) -> list[dict]:
+    """Các cộng tác viên của Workspace, để quản trị thấy đủ ai có mặt."""
+    rows = conn.execute("""SELECT u.id user_id, u.username, u.status user_status
+                            FROM pipeline_memberships m JOIN users u ON u.id=m.user_id
+                            WHERE m.pipeline_id=? AND m.status='active' AND u.role='ctv'
+                            ORDER BY u.username""", (int(pipeline_id),)).fetchall()
+    saved = {int(row["ctv_user_id"]) for row in conn.execute(
+        f"SELECT ctv_user_id FROM {TABLE} WHERE pipeline_id=?", (int(pipeline_id),)).fetchall()}
+    return [{"user_id": int(row["user_id"]), "username": row["username"],
+             "user_status": row["user_status"], "configured": int(row["user_id"]) in saved}
+            for row in rows]
+
+
 def active_configs(conn, pipeline_id: int) -> list[dict]:
     """Các cấu hình đang bật, dùng cho bộ xếp lịch."""
-    rows = conn.execute(f"SELECT * FROM {TABLE} WHERE pipeline_id=? AND enabled=1 "
-                        f"ORDER BY ctv_user_id", (int(pipeline_id),)).fetchall()
+    rows = conn.execute(f"SELECT * FROM {TABLE} WHERE pipeline_id=? AND enabled=1",
+                        (int(pipeline_id),)).fetchall()
     return [_row_to_settings(row) for row in rows]
 
 
@@ -360,7 +371,11 @@ def clamp_to_policy(conn, pipeline_id: int, settings: dict) -> dict:
 
 
 def save_settings(conn, pipeline_id: int, ctv_user_id: int, data: dict) -> dict:
-    """Tạo hoặc cập nhật cấu hình của một CTV."""
+    """Tạo hoặc cập nhật cấu hình tự động đăng của Workspace.
+
+    Một Workspace có một CTV, nên chỉ có một cấu hình. Người lưu cấu hình
+    được ghi lại để truy vết.
+    """
     current = settings_of(conn, pipeline_id, ctv_user_id) or defaults_for(pipeline_id, ctv_user_id)
     merged = {**current}
     for key in ("enabled", "topic", "caption_template", "timezone", "start_time", "end_time",
@@ -396,7 +411,8 @@ def save_settings(conn, pipeline_id: int, ctv_user_id: int, data: dict) -> dict:
          start_time,end_time,timezone,schedule_rules_json,ai_caption_enabled,
          approval_required,anti_duplicate,apply_to_new_accounts,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(pipeline_id, ctv_user_id) DO UPDATE SET
+        ON CONFLICT(pipeline_id) DO UPDATE SET
+            ctv_user_id=excluded.ctv_user_id,
             enabled=excluded.enabled, account_scope=excluded.account_scope,
             selected_account_ids_json=excluded.selected_account_ids_json,
             selected_group_ids_json=excluded.selected_group_ids_json,

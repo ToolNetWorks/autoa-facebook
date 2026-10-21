@@ -202,15 +202,24 @@ def pending_requests(conn, pipeline_id: int, limit: int = 5) -> list[dict]:
     """Các cặp đang cần gửi yêu cầu tham gia.
 
     Chỉ những group mà CTV đã bật tự động tham gia, và chỉ khi trạng thái
-    chưa rõ ràng: đang chờ duyệt hoặc đã thành viên thì không gửi lại.
+    chưa rõ ràng: đang chờ duyệt, đã thành viên hoặc bị từ chối thì không
+    gửi lại.
+
+    Group chưa từng được kiểm tra cũng được gửi yêu cầu, vì đó là lần đầu.
     """
-    rows = conn.execute(f"""SELECT m.*, g.url group_url, g.label group_label, g.auto_join,
-                                  g.join_answers_json, g.posting_mode, g.nickname,
-                                  a.label account_label
-                           FROM {TABLE} m JOIN groups g ON g.id=m.group_id
-                           JOIN accounts a ON a.id=m.account_id
-                           WHERE m.pipeline_id=? AND g.auto_join=1 AND g.enabled=1
-                             AND m.membership_status NOT IN ({','.join('?' * len(SETTLED_STATUSES))})
-                           ORDER BY m.id LIMIT ?""",
-                        (int(pipeline_id), *SETTLED_STATUSES, int(limit))).fetchall()
+    rows = conn.execute(f"""SELECT g.id group_id, g.account_id, g.url group_url,
+                                  g.label group_label, g.auto_join, g.join_answers_json,
+                                  g.posting_mode, g.nickname,
+                                  a.label account_label,
+                                  COALESCE(m.membership_status, ?) membership_status,
+                                  m.join_questions_json, m.updated_at membership_updated_at
+                           FROM groups g
+                           JOIN accounts a ON a.id=g.account_id
+                           LEFT JOIN {TABLE} m ON m.group_id=g.id AND m.account_id=g.account_id
+                                AND m.pipeline_id=g.pipeline_id
+                           WHERE g.pipeline_id=? AND g.auto_join=1 AND g.enabled=1
+                             AND (m.id IS NULL
+                                  OR m.membership_status NOT IN ({','.join('?' * len(SETTLED_STATUSES))}))
+                           ORDER BY COALESCE(m.updated_at, g.created_at) LIMIT ?""",
+                        (UNKNOWN, int(pipeline_id), *SETTLED_STATUSES, int(limit))).fetchall()
     return [dict(row) for row in rows]

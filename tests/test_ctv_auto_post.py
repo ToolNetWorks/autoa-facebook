@@ -240,10 +240,15 @@ def test_configuration_survives_logout_and_login(client):
 
 # --- 8. CTV thứ hai có cấu hình riêng ----------------------------------------
 
-def test_two_collaborators_have_separate_configurations(client):
+def test_a_workspace_has_one_configuration(client):
+    """1 Pipeline = 1 CTV = 1 Workspace: Workspace chỉ có một cấu hình.
+
+    Cấu hình tự động đăng thuộc về Workspace chứ không thuộc về từng tài
+    khoản, nên người làm việc trong Workspace đó dùng chung một cấu hình.
+    """
     pipeline = make_pipeline(client, '@ctv_two')
-    first = make_ctv(client, pipeline, 'ctv_first_of_two')
-    second = make_ctv(client, pipeline, 'ctv_second_of_two')
+    make_ctv(client, pipeline, 'ctv_first_of_two')
+    make_ctv(client, pipeline, 'ctv_second_of_two')
     key = new_pipeline_key(client, pipeline)
 
     one, _ = login_ctv('ctv_first_of_two', key)
@@ -253,17 +258,16 @@ def test_two_collaborators_have_separate_configurations(client):
 
     config_one = my_config(one, pipeline).json()
     config_two = my_config(two, pipeline).json()
-    assert config_one['settings']['topic'] == 'chủ đề A'
+    assert config_one['settings']['topic'] == 'chủ đề B'
     assert config_two['settings']['topic'] == 'chủ đề B'
-    assert config_one['settings']['max_posts_per_account_daily'] == 3
+    assert config_one['settings']['max_posts_per_account_daily'] == 2
     assert config_two['settings']['max_posts_per_account_daily'] == 2
-    assert config_one['settings']['ctv_user_id'] == first
-    assert config_two['settings']['ctv_user_id'] == second
     one.close()
     two.close()
 
 
-def test_one_collaborator_configuration_never_becomes_the_default_of_another(client):
+def test_a_workspace_without_a_configuration_starts_from_the_defaults(client):
+    """Chưa ai lưu thì giao diện mở ra vẫn là form mặc định."""
     pipeline = make_pipeline(client, '@ctv_default')
     make_ctv(client, pipeline, 'ctv_with_config')
     make_ctv(client, pipeline, 'ctv_without_config')
@@ -271,10 +275,15 @@ def test_one_collaborator_configuration_never_becomes_the_default_of_another(cli
 
     one, _ = login_ctv('ctv_with_config', key)
     two, _ = login_ctv('ctv_without_config', key)
-    save_config(one, pipeline, topic='riêng của A')
     body = my_config(two, pipeline).json()
     assert body['configured'] is False
     assert body['settings']['topic'] == ''
+    assert body['settings']['enabled'] is False
+    # Lưu lần đầu thì Workspace có cấu hình.
+    save_config(one, pipeline, topic='cấu hình của Workspace')
+    body = my_config(two, pipeline).json()
+    assert body['configured'] is True
+    assert body['settings']['topic'] == 'cấu hình của Workspace'
     one.close()
     two.close()
 
@@ -312,18 +321,21 @@ def test_collaborator_cannot_send_another_owner_in_the_body(client):
     response = one.put(f'/api/pipelines/{pipeline}/auto-post/my-config',
                        json={'topic': 'đã bị sửa', 'ctv_user_id': second})
     assert response.status_code == 200
-    # Cấu hình ghi vào vẫn là của chính người gửi.
-    assert my_config(one, pipeline).json()['settings']['topic'] == 'đã bị sửa'
-    assert my_config(two, pipeline).json()['settings']['topic'] == 'của B'
+    # ctv_user_id trong body không dùng để nhắm cấu hình của người khác: cấu
+    # hình thuộc về Workspace và người ghi là người đang đăng nhập.
+    settings = my_config(one, pipeline).json()['settings']
+    assert settings['topic'] == 'đã bị sửa'
+    assert settings['ctv_user_id'] != second
     one.close()
     two.close()
 
 
 # --- 10. admin xem và quản lý được từng cấu hình -----------------------------
 
-def test_admin_sees_and_pauses_every_configuration(client):
+def test_admin_sees_and_pauses_the_workspace_configuration(client):
+    """Admin quản lý được cấu hình của Workspace, và tạm dừng được nó."""
     pipeline = make_pipeline(client, '@ctv_admin')
-    first = make_ctv(client, pipeline, 'ctv_admin_a')
+    make_ctv(client, pipeline, 'ctv_admin_a')
     second = make_ctv(client, pipeline, 'ctv_admin_b')
     key = new_pipeline_key(client, pipeline)
     one, _ = login_ctv('ctv_admin_a', key)
@@ -333,17 +345,17 @@ def test_admin_sees_and_pauses_every_configuration(client):
 
     listing = client.get(f'/api/pipelines/{pipeline}/auto-post/ctv-configs')
     assert listing.status_code == 200
-    rows = {row['username']: row for row in listing.json()['configs']}
-    assert rows['ctv_admin_a']['topic'] == 'A'
-    assert rows['ctv_admin_b']['topic'] == 'B'
-    assert rows['ctv_admin_a']['enabled'] is True
+    rows = listing.json()['configs']
+    assert len(rows) == 1
+    assert rows[0]['topic'] == 'B'
+    assert rows[0]['enabled'] is True
 
-    assert client.get(f'/api/pipelines/{pipeline}/auto-post/ctv-configs/{first}').json()[
-        'settings']['topic'] == 'A'
+    assert client.get(f'/api/pipelines/{pipeline}/auto-post/ctv-configs/{second}').json()[
+        'settings']['topic'] == 'B'
     paused = client.post(f'/api/pipelines/{pipeline}/auto-post/ctv-configs/{second}/pause')
     assert paused.status_code == 200
     assert paused.json()['settings']['enabled'] is False
-    # CTV B nhìn thấy trạng thái bị tạm dừng.
+    # Người trong Workspace nhìn thấy trạng thái bị tạm dừng.
     assert my_config(two, pipeline).json()['settings']['enabled'] is False
     one.close()
     two.close()

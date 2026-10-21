@@ -101,18 +101,12 @@ def record_outcome(context: JoinContext, pipeline_id: int, account_id: int, grou
 
 
 def pending_requests(context: JoinContext, pipeline_id: int, limit: int = 5) -> list[dict]:
-    """Các cặp cần gửi yêu cầu tham gia, theo thứ tự đã cập nhật."""
+    """Các cặp cần gửi yêu cầu tham gia, theo thứ tự đã cập nhật.
+
+    Nguồn danh sách là một chỗ: :func:`group_membership.pending_requests`.
+    """
     with context.db() as conn:
-        rows = conn.execute(f"""SELECT m.*, g.url group_url, g.label group_label,
-                                      g.join_answers_json, g.auto_join
-                               FROM group_memberships m JOIN groups g ON g.id=m.group_id
-                               WHERE m.pipeline_id=? AND g.auto_join=1 AND g.enabled=1
-                                 AND m.membership_status NOT IN
-                                     ({','.join('?' * len(group_membership.SETTLED_STATUSES))})
-                               ORDER BY m.updated_at LIMIT ?""",
-                            (int(pipeline_id), *group_membership.SETTLED_STATUSES,
-                             int(limit))).fetchall()
-    return [dict(row) for row in rows]
+        return group_membership.pending_requests(conn, pipeline_id, limit)
 
 
 def join_worker(context: JoinContext, pipeline_ids: Callable[[], list[int]],

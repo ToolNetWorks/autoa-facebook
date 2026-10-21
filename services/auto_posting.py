@@ -29,24 +29,43 @@ Bắt buộc:
 Trả về đúng một đối tượng JSON: {"caption": "...", "hashtags": ["..."], "reason": "..."}"""
 
 
-def eligible_groups(groups: list[dict], account_id: int | None = None) -> list[dict]:
+def eligible_groups(groups: list[dict], account_id: int | None = None,
+                    first_post: bool = False, conn=None, pipeline_id: int | None = None,
+                    ) -> list[dict]:
     """The groups of a workspace that may be served automatically.
 
-    A group qualifies only when it has real post evidence for the pair that
-    will publish it: either the post went out, or it is waiting for the group
-    admin to approve it. The group also has to be active with a confirmed
-    permission.
+    The decision belongs to the Facebook–Group pair, never to a group in
+    general: one account posting successfully says nothing about another
+    account in the same group. When a connection is given, the per-pair
+    decision is used.
+
+    ``first_post`` includes groups that were never posted to, because the
+    first post serves as the verification.
     """
     result = []
     for group in groups:
-        if group.get("screening_status") not in group_verification.SERVABLE_STATUSES:
-            continue
-        if group.get("status") != "active" or not group.get("enabled"):
-            continue
-        if not group.get("approved_target"):
-            continue
-        if account_id is not None and group.get("account_id") != account_id:
-            continue
+        if conn is not None and pipeline_id is not None:
+            from services import group_eligibility
+            allowed = []
+            for candidate in group_eligibility.accounts_of(conn, pipeline_id, group):
+                decision = group_eligibility.pair_decision(conn, pipeline_id, candidate,
+                                                            group["id"], group)
+                if decision["eligible"]:
+                    allowed.append(candidate)
+            if account_id is not None:
+                allowed = [item for item in allowed if item == int(account_id)]
+            if not allowed:
+                continue
+        else:
+            if not first_post:
+                if group.get("screening_status") not in group_verification.AUTO_POSTABLE_STATUSES:
+                    continue
+            if group.get("status") != "active" or not group.get("enabled"):
+                continue
+            if not group.get("approved_target"):
+                continue
+            if account_id is not None and group.get("account_id") != account_id:
+                continue
         result.append(group)
     result.sort(key=lambda item: (0 if item.get("screening_status") == group_verification.VERIFIED_POSTED
                                   else 1, item.get("id", 0)))

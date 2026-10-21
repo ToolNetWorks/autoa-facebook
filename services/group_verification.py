@@ -69,8 +69,13 @@ TONES = {
 HAS_POST_EVIDENCE = (VERIFIED_POSTED, PENDING_GROUP_APPROVAL)
 
 #: Những trạng thái cho thấy tài khoản đã chứng minh được nó đăng được vào
-#: group này, nên bộ xếp lịch được phục vụ.
+#: group này.
 SERVABLE_STATUSES = (VERIFIED_POSTED, PENDING_GROUP_APPROVAL)
+
+#: Những trạng thái cho phép bộ xếp lịch phục vụ cặp này. Một group mà bài
+#: phải chờ quản trị group duyệt thì mỗi bài đều cần người duyệt, nên hệ
+#: thống không tự đăng vào đó.
+AUTO_POSTABLE_STATUSES = (VERIFIED_POSTED,)
 
 #: Những trạng thái chặn bộ xếp lịch.
 BLOCKING_STATUSES = (NOT_TESTED, TEST_IN_PROGRESS, SUBMITTED_UNVERIFIED, REJECTED,
@@ -103,8 +108,14 @@ def tone_of(status: str) -> str:
 
 
 def is_servable(status: str) -> bool:
-    """Bộ xếp lịch có phục vụ cặp này không."""
-    return str(status or NOT_TESTED) in SERVABLE_STATUSES
+    """Bộ xếp lịch có phục vụ cặp này không.
+
+    Chỉ ``VERIFIED_POSTED`` mới đủ: đó là bằng chứng bài đã thực sự xuất
+    hiện trong group. ``PENDING_GROUP_APPROVAL`` được ghi nhận đúng luồng chờ
+    duyệt nhưng bài đó chưa công khai, nên không được coi là đã đăng thành
+    công và không được tự đăng tiếp vào group đó.
+    """
+    return str(status or NOT_TESTED) in AUTO_POSTABLE_STATUSES
 
 
 def status_from_job(state: str, details: str) -> str:
@@ -170,14 +181,15 @@ def status_of(conn, pipeline_id: int, account_id: int, group_id: int) -> str:
     return row["verification_status"]
 
 
-def servable_status_of(conn, pipeline_id: int, account_id: int, group_id: int) -> str:
+def servable_status_of(conn, pipeline_id: int, account_id: int, group_id: int,
+                       current_mode: str = "anonymous") -> str:
     """Trạng thái xác minh, chỉ tính khi bằng chứng còn phù hợp."""
     row = row_of(conn, pipeline_id, account_id, group_id)
     if row is None:
         return NOT_TESTED
     if row["verification_status"] not in HAS_POST_EVIDENCE:
         return row["verification_status"]
-    if row["verified_posting_mode"] and row["verified_posting_mode"] != "anonymous":
+    if row["verified_posting_mode"] and row["verified_posting_mode"] != current_mode:
         # Chế độ đăng đã xác minh khác chế độ đang dùng thì bằng chứng không
         # còn phù hợp.
         return NOT_TESTED
@@ -268,7 +280,7 @@ def payload(row) -> dict:
     if row is None:
         return {"verification_status": NOT_TESTED, "status_label": label_of(NOT_TESTED),
                 "status_tone": tone_of(NOT_TESTED), "has_evidence": False,
-                "verified_post_url": "", "verified_posting_mode": "",
+                "auto_postable": False, "verified_post_url": "", "verified_posting_mode": "",
                 "submitted_at": None, "verified_at": None, "last_error_code": ""}
     item = dict(row)
     status = item.get("verification_status") or NOT_TESTED
@@ -276,6 +288,7 @@ def payload(row) -> dict:
     item["status_label"] = label_of(status)
     item["status_tone"] = tone_of(status)
     item["has_evidence"] = status in HAS_POST_EVIDENCE
+    item["auto_postable"] = status in AUTO_POSTABLE_STATUSES
     item["evidence_reference"] = item.get("evidence_reference") or ""
     return item
 

@@ -167,6 +167,8 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
     accounts = _account_rows(conn, pipeline_id, settings)
     groups = _group_rows(conn, pipeline_id, settings)
     decisions = pair_decisions(conn, pipeline_id, groups)
+        # Bài đầu tiên của một cặp cũng là lần xác minh, nên group chưa từng
+    # đăng vẫn được phục vụ. Sau lần đầu, trạng thái bằng chứng quyết định.
     eligible = group_eligibility.eligible_pairs(conn, pipeline_id, groups)
     media = _media_rows(conn, pipeline_id)
     provider_config = provider_config or ai_provider.load_config()

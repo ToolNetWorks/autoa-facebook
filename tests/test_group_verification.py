@@ -89,7 +89,12 @@ def make_job(admin, pipeline_id, account_id, group_id):
 
 # --- 1. group chưa từng đăng ------------------------------------------------
 
-def test_a_group_that_never_posted_is_not_tested(client):
+def test_a_group_that_never_posted_can_start_its_first_post(client):
+    """Chưa từng đăng không có nghĩa là không được đăng.
+
+    Bài đầu tiên chính là lần xác minh thực tế, nên group chưa có bằng chứng
+    vẫn được đưa vào luồng xuất bản.
+    """
     pipeline = make_pipeline(client, '@vf1')
     account = make_account(client, pipeline, 'Facebook')
     group = make_group(client, pipeline, account, 'Group mới',
@@ -98,11 +103,13 @@ def test_a_group_that_never_posted_is_not_tested(client):
         assert group_verification.status_of(conn, pipeline, account, group) \
             == group_verification.NOT_TESTED
         decision = group_eligibility.pair_decision(conn, pipeline, account, group)
-    assert decision['eligible'] is False
-    assert 'bằng chứng' in decision['reason'].lower()
+    assert decision['eligible'] is True
+    assert decision['first_post_eligible'] is True
+    assert decision['decision'] == group_eligibility.FIRST_POST_READY
 
 
-def test_a_group_without_evidence_is_never_scheduled(client):
+def test_a_group_without_evidence_gets_its_first_post_scheduled(client):
+    """Bộ xếp lịch chuẩn bị bài đầu tiên cho group chưa từng đăng."""
     pipeline = make_pipeline(client, '@vf1b')
     account = make_account(client, pipeline, 'Facebook')
     group = make_group(client, pipeline, account, 'Group mới',
@@ -110,8 +117,8 @@ def test_a_group_without_evidence_is_never_scheduled(client):
     make_picture(client, pipeline)
     enable_auto_post(client, pipeline, [group])
     preview = client.post(f'/api/pipelines/{pipeline}/auto-post/preview').json()['preview']
-    assert preview['posts'] == []
-    assert preview['media_id'] is None
+    assert len(preview['posts']) == 1
+    assert preview['posts'][0]['group_id'] == group
 
 
 # --- 2. bài đã đăng thành công ----------------------------------------------
@@ -280,10 +287,18 @@ def test_each_account_has_its_own_verification(client):
         m.refresh_screening_for_job(conn, job_id)
         assert group_verification.status_of(conn, pipeline, first, group) \
             == group_verification.VERIFIED_POSTED
+        # Facebook B không thừa hưởng kết quả của Facebook A: nó vẫn là
+        # NOT_TESTED, nên chỉ được làm bài đầu tiên chứ không được coi là
+        # đã xác minh và được xếp lịch lặp lại.
         assert group_verification.status_of(conn, pipeline, second, group) \
             == group_verification.NOT_TESTED
-        assert group_eligibility.pair_decision(conn, pipeline, first, group)['eligible'] is True
-        assert group_eligibility.pair_decision(conn, pipeline, second, group)['eligible'] is False
+        first_decision = group_eligibility.pair_decision(conn, pipeline, first, group)
+        second_decision = group_eligibility.pair_decision(conn, pipeline, second, group)
+        assert first_decision['eligible'] is True
+        assert first_decision['decision'] == group_eligibility.VERIFIED_READY
+        assert second_decision['status'] == group_verification.NOT_TESTED
+        assert second_decision['decision'] == group_eligibility.FIRST_POST_READY
+        assert second_decision['recurring_eligible'] is False
 
 
 # --- 9. group chỉ hỗ trợ chế độ đăng khác -----------------------------------

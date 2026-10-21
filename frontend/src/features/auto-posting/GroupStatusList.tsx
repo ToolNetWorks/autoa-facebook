@@ -4,42 +4,80 @@ import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Skeleton } from '@/components/ui/Surfaces';
 
-
 type Tone = 'ok' | 'warn' | 'bad' | 'neutral' | 'info';
 
 /** Số dòng hiện trước khi bấm “Xem tất cả”. */
 const PREVIEW_ROWS = 8;
 
-const LABELS: Record<string, string> = {
-  priority: 'Đủ điều kiện đăng trực tiếp',
-  review: 'Cần Admin group duyệt bài',
-  unknown: 'Chưa xác minh',
-  not_member: 'Chưa tham gia group',
-  not_accessible: 'Không xem được nội dung group',
-  restricted: 'Facebook hạn chế quyền đăng',
-  failed: 'Không kiểm tra được',
+/**
+ * Trạng thái xác minh thực tế của một cặp Facebook–Group.
+ *
+ * Đây là trạng thái của bằng chứng đăng bài, không phải kết quả một lần
+ * kiểm tra bằng trình duyệt. Group chưa từng đăng thì vẫn đưa được vào luồng
+ * đăng tự động, vì bài đầu tiên chính là lần xác minh.
+ */
+const VERIFICATION_LABEL: Record<string, string> = {
+  not_tested: 'Chưa từng đăng — sẽ đăng bài đầu tiên',
+  test_in_progress: 'Đang xác minh',
+  submitted_unverified: 'Đã gửi, chưa xác nhận được',
+  pending_group_approval: 'Đang chờ Admin group duyệt',
+  verified_posted: 'Đã xác minh đăng thành công',
+  rejected: 'Bài bị từ chối',
+  restricted_confirmed: 'Facebook hạn chế quyền đăng',
+  check_failed: 'Không kiểm tra được',
 };
 
-const TONE: Record<string, Tone> = {
-  priority: 'ok',
-  review: 'warn',
-  not_member: 'warn',
-  not_accessible: 'warn',
-  restricted: 'bad',
-  failed: 'bad',
-  unknown: 'neutral',
+const VERIFICATION_TONE: Record<string, Tone> = {
+  not_tested: 'info',
+  test_in_progress: 'info',
+  submitted_unverified: 'warn',
+  pending_group_approval: 'warn',
+  verified_posted: 'ok',
+  rejected: 'bad',
+  restricted_confirmed: 'bad',
+  check_failed: 'bad',
 };
 
-interface ScreeningResult {
-  id: number;
+/** Trạng thái nghiệp vụ, cách nói chung cho người dùng. */
+const DECISION_LABEL: Record<string, string> = {
+  first_post_ready: 'Sẵn sàng đăng bài đầu tiên',
+  verified_ready: 'Đã xác minh, có thể đăng tiếp',
+  waiting_membership: 'Đang chờ tham gia group',
+  waiting_approval: 'Đang chờ duyệt',
+  needs_action: 'Cần xử lý',
+  confirmed_restricted: 'Bị hạn chế quyền đăng',
+  safety_blocked: 'Bị chặn vì nội dung',
+};
+
+const DECISION_TONE: Record<string, Tone> = {
+  first_post_ready: 'info',
+  verified_ready: 'ok',
+  waiting_membership: 'warn',
+  waiting_approval: 'warn',
+  needs_action: 'warn',
+  confirmed_restricted: 'bad',
+  safety_blocked: 'bad',
+};
+
+interface Verification {
   group_id: number;
   account_id: number;
   group_label: string;
   account_label: string;
-  moderation_status: string;
-  evidence_summary: string;
+  posting_mode: string;
+  nickname: string;
+  verification_status: string;
+  status_label: string;
+  status_tone: Tone;
+  reason: string;
   next_action: string;
-  last_checked_at: string | null;
+  has_evidence: boolean;
+  auto_postable: boolean;
+  verified_post_url: string;
+  verified_at: string | null;
+  submitted_at: string | null;
+  decision: string;
+  membership?: { membership_status: string; status_label: string };
 }
 
 /**
@@ -61,23 +99,26 @@ export function GroupStatusList({
   selectedGroupIds: number[];
 }) {
   const { push } = useToast();
-  const [results, setResults] = useState<ScreeningResult[]>([]);
+  const [results, setResults] = useState<Verification[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [expanded, setExpanded] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
     try {
-      const response = await api.get<{ results: ScreeningResult[] }>(
-        `/api/pipelines/${pipelineId}/groups/screening-results`,
+      const response = await api.get<{ verifications: Verification[] }>(
+        `/api/pipelines/${pipelineId}/groups/verifications`,
       );
-      setResults(response.results);
+      setResults(response.verifications);
       setError(null);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'Không tải được trạng thái group');
+      if (!quiet) {
+        setError(failure instanceof Error ? failure.message : 'Không tải được trạng thái group');
+      }
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, [pipelineId]);
 
@@ -86,21 +127,21 @@ export function GroupStatusList({
   }, [load]);
 
   const byPair = useMemo(() => {
-    const map = new Map<string, ScreeningResult>();
+    const map = new Map<string, Verification>();
     results.forEach((item) => {
       map.set(`${item.account_id}:${item.group_id}`, item);
     });
     return map;
   }, [results]);
 
-  const eligibleByAccount = useMemo(() => {
-    const counts: Record<number, number> = {};
+  /** Số group theo từng trạng thái nghiệp vụ, để người dùng thấy công việc thực tế. */
+  const counts = useMemo(() => {
+    const total: Record<string, number> = {};
     results.forEach((item) => {
-      if (item.moderation_status === 'priority' || item.moderation_status === 'review') {
-        counts[item.account_id] = (counts[item.account_id] ?? 0) + 1;
-      }
+      const key = item.decision || 'needs_action';
+      total[key] = (total[key] ?? 0) + 1;
     });
-    return counts;
+    return total;
   }, [results]);
 
   const rows = useMemo(() => {
@@ -109,10 +150,7 @@ export function GroupStatusList({
       group: { id: number; label: string; account_id?: number | null };
       accountId: number;
       accountLabel: string;
-      status: string;
-      reason: string;
-      action: string;
-      checked: string | null;
+      verification: Verification | undefined;
     }[] = [];
     selected.forEach((groupId) => {
       const group = groups.find((item) => item.id === groupId);
@@ -122,15 +160,11 @@ export function GroupStatusList({
       const usable = pool.find((account) => byPair.has(`${account.id}:${groupId}`));
       const target = usable ?? pool[0] ?? accounts[0];
       if (!target) return;
-      const found = byPair.get(`${target.id}:${groupId}`);
       list.push({
         group,
         accountId: target.id,
         accountLabel: target.label,
-        status: found?.moderation_status ?? 'unknown',
-        reason: found?.evidence_summary ?? 'Chưa kiểm tra quyền đăng của cặp Facebook–Group này.',
-        action: found?.next_action ?? 'Bấm Kiểm tra lại để hệ thống xác minh.',
-        checked: found?.last_checked_at ?? null,
+        verification: byPair.get(`${target.id}:${groupId}`),
       });
     });
     return list;
@@ -141,9 +175,9 @@ export function GroupStatusList({
     try {
       await api.post(`/api/pipelines/${pipelineId}/groups/${groupId}/recheck`, { force: true });
       push('Đã xếp hàng kiểm tra lại group', 'success');
-      await load();
+      await load(true);
     } catch (failure) {
-      push(failure instanceof Error ? failure.message : 'Không kiểm tra lại được', 'error');
+      push(failure instanceof Error ? failure.message : 'Không kiểm tra được', 'error');
     } finally {
       setBusy(null);
     }
@@ -166,19 +200,31 @@ export function GroupStatusList({
     );
   }
 
+  const decisionOrder = [
+    'first_post_ready',
+    'verified_ready',
+    'waiting_membership',
+    'waiting_approval',
+    'needs_action',
+    'confirmed_restricted',
+    'safety_blocked',
+  ];
+
   return (
     <Card
       title="Trạng thái group"
-      description="Chỉ group đủ điều kiện mới được đưa vào lịch tự động. Group còn lại vẫn nằm trong cấu hình của bạn."
+      description="Group chưa từng đăng vẫn được đưa vào lịch: bài đầu tiên chính là lần xác minh. Chỉ group đã xác minh mới được đăng tiếp."
     >
-      {accounts.length > 0 ? (
+      {Object.keys(counts).length > 0 ? (
         <div className="stat-row" style={{ marginBottom: 'var(--sp-3)' }}>
-          {accounts.map((account) => (
-            <div className="stat" key={account.id}>
-              <span>{account.label}</span>
-              <strong>{eligibleByAccount[account.id] ?? 0}</strong>
-            </div>
-          ))}
+          {decisionOrder
+            .filter((key) => (counts[key] ?? 0) > 0)
+            .map((key) => (
+              <div className="stat" key={key}>
+                <span>{DECISION_LABEL[key] ?? key}</span>
+                <strong>{counts[key]}</strong>
+              </div>
+            ))}
         </div>
       ) : null}
 
@@ -186,34 +232,56 @@ export function GroupStatusList({
         <EmptyState title="Chưa chọn group nào" description="Chọn group ở phần cấu hình phía trên." />
       ) : (
         <DataTable head={['Group', 'Facebook', 'Trạng thái', 'Lý do', 'Cách xử lý', 'Thao tác']}>
-          {(expanded ? rows : rows.slice(0, PREVIEW_ROWS)).map((row) => (
-            <tr key={`${row.group.id}:${row.accountId}`}>
-              <td>
-                <div className="cell-title truncate" style={{ maxWidth: '180px' }}>
-                  {row.group.label}
-                </div>
-              </td>
-              <td>
-                <div className="cell-sub truncate" style={{ maxWidth: '120px' }}>
-                  {row.accountLabel}
-                </div>
-              </td>
-              <td>
-                <Badge tone={TONE[row.status] ?? 'neutral'}>{LABELS[row.status] ?? row.status}</Badge>
-              </td>
-              <td>
-                <div className="cell-sub">{row.reason}</div>
-              </td>
-              <td>
-                <div className="cell-sub">{row.action}</div>
-              </td>
-              <td className="actions">
-                <Button size="sm" loading={busy === row.group.id} onClick={() => void recheck(row.group.id)}>
-                  Kiểm tra lại
-                </Button>
-              </td>
-            </tr>
-          ))}
+          {(expanded ? rows : rows.slice(0, PREVIEW_ROWS)).map((row) => {
+            const item = row.verification;
+            const decision = item?.decision ?? 'needs_action';
+            return (
+              <tr key={`${row.group.id}:${row.accountId}`}>
+                <td>
+                  <div className="cell-title truncate" style={{ maxWidth: '180px' }}>
+                    {row.group.label}
+                  </div>
+                </td>
+                <td>
+                  <div className="cell-sub truncate" style={{ maxWidth: '120px' }}>
+                    {row.accountLabel}
+                  </div>
+                </td>
+                <td>
+                  <Badge tone={VERIFICATION_TONE[item?.verification_status ?? 'not_tested'] ?? 'neutral'}>
+                    {VERIFICATION_LABEL[item?.verification_status ?? 'not_tested'] ?? 'Chưa xác minh'}
+                  </Badge>
+                  <Badge tone={DECISION_TONE[decision] ?? 'neutral'}>
+                    {DECISION_LABEL[decision] ?? decision}
+                  </Badge>
+                </td>
+                <td>
+                  <div className="cell-sub">
+                    {item?.reason ?? 'Chưa có bằng chứng đăng bài cho cặp này.'}
+                  </div>
+                </td>
+                <td>
+                  <div className="cell-sub">
+                    {item?.next_action ?? 'Bấm Xếp lịch ngay để chuẩn bị bài đầu tiên.'}
+                  </div>
+                </td>
+                <td className="actions">
+                  {item?.verified_post_url ? (
+                    <a href={item.verified_post_url} target="_blank" rel="noreferrer">
+                      Xem bài
+                    </a>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    loading={busy === row.group.id}
+                    onClick={() => void recheck(row.group.id)}
+                  >
+                    Kiểm tra lại
+                  </Button>
+                </td>
+              </tr>
+            );
+          })}
         </DataTable>
       )}
 
@@ -225,9 +293,9 @@ export function GroupStatusList({
         </div>
       ) : null}
 
-      {rows.some((row) => row.status === 'failed') ? (
+      {Object.keys(counts).some((key) => key === 'check_failed' || key === 'needs_action') ? (
         <Alert tone="warn">
-          Có group chưa kiểm tra được. Bấm “Kiểm tra lại” để thử lại, hoặc đăng nhập lại Facebook nếu phiên đã hết hạn.
+          Có group chưa xác minh được. Bấm “Kiểm tra lại” để thử lại, hoặc đăng nhập lại Facebook nếu phiên đã hết hạn.
         </Alert>
       ) : null}
     </Card>

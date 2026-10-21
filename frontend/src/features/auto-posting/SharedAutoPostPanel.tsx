@@ -231,7 +231,7 @@ export function SharedAutoPostPanel({
       <div className="stat-row">
         <Stat label="Facebook đang hoạt động" value={totals.accounts} />
         <Stat label="Đạt giới hạn hôm nay" value={totals.at_limit} muted={totals.at_limit === 0} />
-        <Stat label="Group đủ điều kiện" value={totals.eligible_groups} muted={totals.eligible_groups === 0} />
+        <Stat label="Group sẵn sàng đăng" value={totals.eligible_groups} muted={totals.eligible_groups === 0} />
         <Stat label="Bài đã xác nhận đăng" value={totals.published_today} />
         <Stat label="Bài đang chờ" value={totals.waiting} />
         <Stat label="Bài bị chặn trùng" value={totals.blocked_duplicate} muted={totals.blocked_duplicate === 0} />
@@ -248,9 +248,9 @@ export function SharedAutoPostPanel({
       ) : null}
 
       {totals.eligible_groups === 0 && totals.total_groups > 0 ? (
-        <Alert tone="warn">
-          Chưa có group nào đủ điều kiện đăng tự động. Cần xác minh quyền đăng và hỗ trợ đúng chế độ ẩn danh
-          hoặc biệt danh trước khi hệ thống xếp lịch.
+        <Alert tone="info">
+          Chưa group nào được xác minh đăng, nhưng bài đầu tiên vẫn được phép: mỗi group sẽ tự được
+          chuẩn bị và xác minh khi bấm “Xếp lịch ngay”. Xem trạng thái từng group ở bảng bên dưới.
         </Alert>
       ) : null}
 
@@ -342,8 +342,8 @@ export function SharedAutoPostPanel({
             ))}
           </div>
           <p className="hint">
-            Không chọn group nào nghĩa là dùng toàn bộ group của Workspace. Group chưa xác minh hoặc bị hạn chế
-            sẽ không được xếp lịch.
+            Không chọn group nào nghĩa là dùng toàn bộ group của Workspace. Group đã chọn vẫn được giữ nguyên
+            trong cấu hình dù chưa xác minh; group bị hạn chế hoặc bị chặn mới bị loại khỏi lịch.
           </p>
 
           <Textarea

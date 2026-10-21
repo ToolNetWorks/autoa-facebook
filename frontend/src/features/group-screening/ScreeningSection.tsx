@@ -4,6 +4,7 @@ import { api } from '@/services/apiClient';
 import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Skeleton, Tabs } from '@/components/ui/Surfaces';
+import { Modal } from '@/components/ui/Modal';
 import { usePermissions } from '@/hooks/usePermissions';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
@@ -41,6 +42,17 @@ const FILTERS = [
   { id: 'restricted', label: 'Bị hạn chế' },
 ];
 
+interface VerificationDraft {
+  body: string;
+  media: string[];
+  media_name: string;
+  account_label: string;
+  group_label: string;
+  posting_mode: string;
+  nickname: string;
+  group_id: number;
+}
+
 interface Verification {
   group_id: number;
   account_id: number;
@@ -69,6 +81,7 @@ export function ScreeningSection({ workspace }: { workspace: WorkspaceData }) {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('all');
   const [busy, setBusy] = useState<number | null>(null);
+  const [draft, setDraft] = useState<VerificationDraft | null>(null);
 
   const load = useCallback(async (quiet = false) => {
     if (!workspace.pipelineId) {
@@ -133,11 +146,31 @@ export function ScreeningSection({ workspace }: { workspace: WorkspaceData }) {
     return rows.filter((item) => item.verification_status === 'restricted_confirmed');
   }, [rows, filter]);
 
-  async function verify(item: Verification) {
+  /** Buoc 1: chuan bi mot bai viet that de xem truoc. */
+  async function prepare(item: Verification) {
     setBusy(item.group_id);
     try {
-      await api.post(`/api/pipelines/${workspace.pipelineId}/groups/${item.group_id}/verification/confirm`);
+      const response = await api.post<{ draft: VerificationDraft }>(
+        `/api/pipelines/${workspace.pipelineId}/groups/${item.group_id}/verification/prepare`,
+      );
+      setDraft(response.draft);
+    } catch (failure) {
+      push(failure instanceof Error ? failure.message : 'Không chuẩn bị được bài xác minh', 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Buoc 3: CTV xac nhan gui. */
+  async function confirm() {
+    if (!draft) return;
+    setBusy(draft.group_id);
+    try {
+      await api.post(
+        `/api/pipelines/${workspace.pipelineId}/groups/${draft.group_id}/verification/confirm`,
+      );
       push('Đã gửi bài xác minh. Hệ thống sẽ báo lại kết quả thật.', 'info');
+      setDraft(null);
       await load(true);
     } catch (failure) {
       push(failure instanceof Error ? failure.message : 'Không gửi được bài xác minh', 'error');
@@ -274,7 +307,7 @@ export function ScreeningSection({ workspace }: { workspace: WorkspaceData }) {
                   <td className="actions">
                     <div className="btn-row" style={{ justifyContent: 'flex-end' }}>
                       {can('group_posts.create') && item.verification_status === 'not_tested' ? (
-                        <Button size="sm" loading={busy === item.group_id} onClick={() => void verify(item)}>
+                        <Button size="sm" loading={busy === item.group_id} onClick={() => void prepare(item)}>
                           Xác minh bằng bài đăng
                         </Button>
                       ) : null}
@@ -291,6 +324,42 @@ export function ScreeningSection({ workspace }: { workspace: WorkspaceData }) {
           </Card>
         </>
       ) : null}
+
+      <Modal
+        open={draft !== null}
+        title="Xem trước bài xác minh"
+        description="Bài này sẽ được đăng thật vào group để xác minh quyền đăng."
+        onClose={() => setDraft(null)}
+        footer={
+          <>
+            <Button onClick={() => setDraft(null)}>Huỷ</Button>
+            <Button variant="primary" loading={busy === draft?.group_id} onClick={() => void confirm()}>
+              Xác nhận gửi
+            </Button>
+          </>
+        }
+      >
+        {draft ? (
+          <div className="stack">
+            <div className="badge-row">
+              <Badge tone="info">{draft.group_label}</Badge>
+              <Badge tone="neutral">{draft.account_label}</Badge>
+              <Badge tone="neutral">
+                {draft.posting_mode === 'nickname' ? 'Biệt danh' : 'Ẩn danh'}
+              </Badge>
+            </div>
+            <p>{draft.body}</p>
+            {draft.media.length > 0 ? (
+              <div className="cell-sub">Ảnh: {draft.media_name || draft.media[0]}</div>
+            ) : (
+              <Alert tone="warn">Bài xác minh chưa có ảnh. Thêm ảnh vào Album trước.</Alert>
+            )}
+            {draft.posting_mode === 'nickname' ? (
+              <div className="cell-sub">Biệt danh: {draft.nickname || 'chưa có tên'}</div>
+            ) : null}
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 }

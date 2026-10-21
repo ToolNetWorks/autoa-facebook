@@ -20,7 +20,7 @@ from typing import Callable
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from services import group_membership, group_verification
+from services import group_eligibility, group_membership, group_verification
 
 
 @dataclass(frozen=True)
@@ -102,6 +102,11 @@ def build_router(deps: Deps) -> APIRouter:
                     item["posting_mode"] = group["posting_mode"]
                     item["nickname"] = group["nickname"]
                     item["membership"] = memberships.get(key, {})
+                    decision = _decision_of(conn, pipeline_id, account_id,
+                                           group["group_id"], item)
+                    item["decision"] = decision.get("decision", group_eligibility.NEEDS_ACTION)
+                    item["reason"] = decision.get("reason", "")
+                    item["next_action"] = decision.get("action", "")
                     result.append(item)
         return {"ok": True, "verifications": result}
 
@@ -285,6 +290,12 @@ def build_router(deps: Deps) -> APIRouter:
         return {"ok": True, "auto_join": bool(data.auto_join)}
 
     return router
+
+
+def _decision_of(conn, pipeline_id: int, account_id: int, group_id: int, item: dict) -> dict:
+    """Trạng thái nghiệp vụ của một cặp, dùng chung với bộ xếp lịch."""
+    from services import group_eligibility
+    return group_eligibility.pair_decision(conn, pipeline_id, account_id, group_id)
 
 
 def _accounts_of_group(conn, group) -> list[int]:

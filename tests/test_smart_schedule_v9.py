@@ -196,7 +196,7 @@ def test_group_waiting_for_approval_is_not_scheduled(client):
     pipeline = make_pipeline(client, '@v9_group')
     account = make_account(client, pipeline, 'Facebook A')
     make_group(client, pipeline, account, 'Group chờ duyệt',
-               'https://www.facebook.com/groups/999999/', screening='unknown')
+               'https://www.facebook.com/groups/999999/', screening='review')
     make_media(client, pipeline, 'a.jpg')
     enable_auto_post(client, pipeline)
     save_schedule(client, pipeline)

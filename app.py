@@ -76,6 +76,7 @@ from services import group_screening
 from services import group_verification
 from services import group_membership
 from services import group_eligibility
+from services import group_targets
 from services import group_join_worker
 from services.group_screening import (
     FRESHNESS_DAYS, MIN_CHECK_INTERVAL_SECONDS, RECHECK_COOLDOWN_SECONDS,
@@ -775,6 +776,58 @@ def init_db():
     migrate_v11_ctv_auto_post()
     migrate_v12_screening_classification()
     migrate_v13_post_verification()
+    migrate_v14_workspace_config()
+
+
+def migrate_v14_workspace_config():
+    """V14: một Workspace có đúng một cấu hình tự động đăng.
+
+    Mô hình là 1 Pipeline = 1 CTV = 1 Workspace, nên cấu hình tự động đăng
+    thuộc về Workspace chứ không thuộc về từng tài khoản. Cấu hình cũ được
+    giữ nguyên; nếu một Workspace từng có nhiều dòng thì dòng cập nhật gần
+    nhất được giữ, các dòng còn lại được chuyển sang bảng lưu trữ chứ không
+    bị xoá.
+    """
+    with db() as conn:
+        ctv_auto_post.ensure_schema(conn)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(ctv_auto_post_settings)")}
+        if not columns:
+            return
+        has_pipeline_unique = False
+        for index in conn.execute("PRAGMA index_list(ctv_auto_post_settings)").fetchall():
+            if not index["unique"]:
+                continue
+            names = [row["name"] for row in conn.execute(
+                f"PRAGMA index_info('{index['name']}')").fetchall()]
+            if names == ["pipeline_id"]:
+                has_pipeline_unique = True
+        if has_pipeline_unique:
+            return
+
+        keep = {row["pipeline_id"]: row["id"] for row in conn.execute(
+            """SELECT pipeline_id, MAX(id) id FROM ctv_auto_post_settings
+               GROUP BY pipeline_id""").fetchall()}
+        conn.execute("""CREATE TABLE IF NOT EXISTS ctv_auto_post_settings_archive (
+            id INTEGER PRIMARY KEY, pipeline_id INTEGER NOT NULL, ctv_user_id INTEGER NOT NULL,
+            payload_json TEXT NOT NULL, archived_at TEXT NOT NULL)""")
+        conn.execute("DROP TABLE IF EXISTS ctv_auto_post_settings_keep")
+        conn.executescript(ctv_auto_post.TABLE_DDL.replace(
+            "CREATE TABLE IF NOT EXISTS ctv_auto_post_settings",
+            "CREATE TABLE ctv_auto_post_settings_keep"))
+        for row in conn.execute("SELECT * FROM ctv_auto_post_settings").fetchall():
+            if keep.get(row["pipeline_id"]) == row["id"]:
+                conn.execute(f"""INSERT INTO ctv_auto_post_settings_keep
+                    ({",".join(row.keys())}) VALUES ({",".join("?" for _ in row.keys())})""",
+                             tuple(row.values()))
+            else:
+                conn.execute("""INSERT INTO ctv_auto_post_settings_archive
+                                (pipeline_id,ctv_user_id,payload_json,archived_at) VALUES(?,?,?,?)""",
+                             (row["pipeline_id"], row["ctv_user_id"],
+                              json.dumps(dict(row), ensure_ascii=False), iso()))
+        conn.execute("DROP TABLE ctv_auto_post_settings")
+        conn.execute("ALTER TABLE ctv_auto_post_settings_keep RENAME TO ctv_auto_post_settings")
+        conn.execute("""CREATE INDEX IF NOT EXISTS idx_ctv_auto_post_owner
+                        ON ctv_auto_post_settings(pipeline_id, ctv_user_id)""")
 
 
 def migrate_v13_post_verification():
@@ -3670,6 +3723,9 @@ def put_auto_post_settings(pipeline_id: int, data: AutoPostSettings,
             if group["pipeline_id"] != pipeline_id:
                 raise HTTPException(404, "Not found")
         payload = {key: value for key, value in data.model_dump().items() if value is not None}
+        # Group được chọn làm mục tiêu đăng thì được phép đặt làm đích. Việc
+        # này không bỏ qua bất kỳ quy định nào của group.
+        group_targets.sync_approved_targets(conn, pipeline_id, data.group_ids)
         settings = save_auto_post_settings(conn, pipeline_id, payload)
     audit("auto_post", None, "Cập nhật cấu hình chung của tự động đăng group", pipeline_id)
     return {"ok": True, "settings": settings}
@@ -3734,7 +3790,9 @@ def get_auto_post_dashboard(pipeline_id: int, principal: Principal = Depends(req
         day = posting_limits.day_of(moment)
         accounts = post_scheduler._account_rows(conn, pipeline_id, settings)
         groups = post_scheduler._group_rows(conn, pipeline_id, settings)
-        eligible = eligible_groups(groups)
+        # Quyet dinh theo tung cap Facebook–Group, khong dung trang thai tong hop
+        # cua group cho moi tai khoan.
+        eligible = eligible_groups(groups, first_post=True, conn=conn, pipeline_id=pipeline_id)
         blockers = post_scheduler.group_blockers(groups)
         items = []
         for account in accounts:
@@ -4042,15 +4100,20 @@ def auto_post_worker():
 def prepare_auto_post_jobs() -> None:
     """Chia công việc cho các tài khoản Facebook của các Workspace đang bật.
 
-    Một Workspace có thể có nhiều cấu hình cùng lúc: cấu hình chung của quản
-    trị và cấu hình riêng của từng CTV. Mỗi cấu hình được xếp lịch riêng nhưng
-    cùng chịu các quy tắc an toàn của cả Pipeline.
+    Một Workspace có một CTV, nên chỉ một bộ cấu hình được dùng cho mỗi
+    Workspace: nếu CTV đã tự cấu hình thì bộ xếp lịch của CTV chạy, bộ xếp lịch
+    chung bỏ qua Workspace đó. Nhờ vậy một group không bị xếp lịch hai lần.
     """
+    with db() as conn:
+        ctv_pipelines = {int(row["pipeline_id"]) for row in conn.execute(
+            """SELECT DISTINCT pipeline_id FROM ctv_auto_post_settings WHERE enabled=1""")}
     with db() as conn:
         pipelines = conn.execute("""SELECT pipeline_id FROM pipeline_auto_post_settings
                                    WHERE enabled=1""").fetchall()
     provider_config = load_ai_config()
     for row in pipelines:
+        if int(row["pipeline_id"]) in ctv_pipelines:
+            continue
         with db() as conn:
             try:
                 schedule = job_allocator.schedule_of(conn, row["pipeline_id"])
@@ -4064,7 +4127,7 @@ def prepare_auto_post_jobs() -> None:
             except Exception as error:
                 LOG.warning("Không xếp lịch được pipeline %s: %s", row["pipeline_id"],
                             type(error).__name__)
-    # Cấu hình riêng của từng CTV, không phụ thuộc cấu hình chung của quản trị.
+    # Cấu hình riêng của CTV, không phụ thuộc cấu hình chung của quản trị.
     with db() as conn:
         ctv_pipelines = conn.execute("""SELECT DISTINCT pipeline_id FROM ctv_auto_post_settings
                                         WHERE enabled=1""").fetchall()

@@ -316,7 +316,7 @@ export function CtvAutoPostPanel({
           ) : null}
 
           <div>
-            <span className="field-label">Group đủ điều kiện</span>
+            <span className="field-label">Group sẽ tự động đăng</span>
             {groupOptions.length === 0 ? (
               <p className="hint">Workspace chưa có group nào.</p>
             ) : (

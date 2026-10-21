@@ -4,6 +4,41 @@ Quyết định luôn gắn với đúng một cặp ``account_id`` + ``group_id
 thái của một Facebook không bao giờ được dùng cho Facebook khác, và trạng
 thái của một group không bao giờ được dùng cho group khác.
 
+Hai loại điều kiện được kiểm tra, theo thứ tự:
+
+A. FIRST POST ELIGIBILITY
+
+Dành cho Group chưa từng có bằng chứng đăng bài.
+
+Trạng thái NOT_TESTED không phải lý do chặn bài đầu tiên.
+
+Nếu tài khoản và Group đáp ứng các điều kiện có thể kiểm chứng:
+
+* Cùng Pipeline.
+* Facebook được CTV chọn.
+* Group được CTV chọn.
+* Phiên Facebook hợp lệ.
+* Có quyền truy cập phù hợp.
+* Đã được xác nhận là thành viên nếu nhóm yêu cầu.
+* Không có hạn chế đã được xác nhận.
+* Chế độ đăng yêu cầu khả dụng.
+* Ảnh/caption đáp ứng Safety Engine.
+* Tác vụ sử dụng phương thức xuất bản được phép.
+
+Thì cho phép đưa bài đầu tiên vào luồng xuất bản.
+
+Không yêu cầu VERIFIED_POSTED trước đó.
+
+B. RECURRING POST ELIGIBILITY
+
+Dành cho những cặp đã có kết quả đăng bài thực tế.
+
+Đánh giá quyền đăng dựa trên kết quả đã quan sát được.
+
+Giữ kiểm tra tình trạng tài khoản, nhóm, danh tính đăng, hạn mức, nội dung và quyền truy cập trước các lần tiếp theo.
+
+Không coi một lần thành công là bảo đảm vĩnh viễn.
+
 Những điều kiện được kiểm tra, theo thứ tự:
 
 1. Group thuộc Workspace, đang bật, hoạt động và được duyệt làm đích.
@@ -13,11 +48,24 @@ Những điều kiện được kiểm tra, theo thứ tự:
 4. Chế độ đăng của group được hỗ trợ bởi tài khoản này.
 5. Chế độ biệt danh đã có tên.
 
-Quan sát của trình duyệt chỉ dùng để hướng dẫn CTV, không dùng để kết luận.
+Không có điều kiện nào được bỏ qua, và không có điều kiện nào được suy đoán.
 """
 from __future__ import annotations
 
-from services import group_screening, group_verification
+from services import group_membership, group_screening, group_verification
+
+#: Trạng thái nghiệp vụ của một cặp Facebook–Group. Đây là cách nói chung
+#: cho giao diện, không thay thế trạng thái bằng chứng đã lưu.
+FIRST_POST_READY = "first_post_ready"
+VERIFIED_READY = "verified_ready"
+WAITING_MEMBERSHIP = "waiting_membership"
+WAITING_APPROVAL = "waiting_approval"
+NEEDS_ACTION = "needs_action"
+CONFIRMED_RESTRICTED = "confirmed_restricted"
+SAFETY_BLOCKED = "safety_blocked"
+
+#: Những trạng thái mà một group có thể được phục vụ tự động.
+ELIGIBLE_STATUSES = (group_verification.VERIFIED_POSTED, group_verification.PENDING_GROUP_APPROVAL)
 
 #: Những trạng thái phiên Facebook không dùng được để đăng.
 #: Một phiên chưa được kiểm tra (unknown) chưa phải là phiên chết: lần kiểm tra
@@ -59,25 +107,25 @@ def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
     if group is None:
         group = conn.execute("SELECT * FROM groups WHERE id=?", (group_id,)).fetchone()
     if group is None or group["pipeline_id"] != int(pipeline_id):
-        return _no(group_screening.STATUS_UNKNOWN, "Group không thuộc Workspace này.", "",
+        return _no(group_verification.NOT_TESTED, "Group không thuộc Workspace này.", "",
                     MODE_ANONYMOUS)
 
     account = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
     if account is None or account["pipeline_id"] != int(pipeline_id):
-        return _no(group_screening.STATUS_UNKNOWN, "Facebook không thuộc Workspace này.", "",
+        return _no(group_verification.NOT_TESTED, "Facebook không thuộc Workspace này.", "",
                     MODE_ANONYMOUS)
 
     mode, nickname = mode_of(conn, account_id, group_id, group)
 
     # 1. Group phải dùng được.
     if not group["enabled"]:
-        return _no(group_screening.STATUS_UNKNOWN, "Group đang tạm dừng.",
+        return _no(group_verification.NOT_TESTED, "Group đang tạm dừng.",
                     "Bật lại group trong cấu hình.", mode)
     if group["status"] != "active":
-        return _no(group_screening.STATUS_UNKNOWN, "Group không hoạt động.",
+        return _no(group_verification.NOT_TESTED, "Group không hoạt động.",
                     "Kiểm tra lại group.", mode)
     if not group["approved_target"]:
-        return _no(group_screening.STATUS_UNKNOWN, "Group chưa được duyệt làm group đích.",
+        return _no(group_verification.NOT_TESTED, "Group chưa được duyệt làm group đích.",
                     "Đánh dấu group là đích được phép đăng.", mode)
 
     # 2. Phiên Facebook phải còn hiệu lực.
@@ -86,37 +134,89 @@ def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
         return _no(group_verification.CHECK_FAILED, "Phiên đăng nhập Facebook chưa hợp lệ.",
                     "Đăng nhập lại Facebook rồi xác minh lại.", mode)
 
-    # 3. Cặp này phải có bằng chứng đăng bài thật.
-    status = group_verification.servable_status_of(conn, pipeline_id, account_id, group_id)
+    # 3. Chế độ đăng phải khả dụng. Điều này áp dụng cho cả bài đầu tiên lẫn
+    #    các bài sau, vì phương thức xuất bản phải được Facebook hỗ trợ.
     evidence = _observation(conn, account_id, group_id)
-    if not group_verification.is_servable(status):
-        return _no(status, group_screening.guidance_of(evidence, status),
-                    _action_of(status, evidence), mode)
-
-    # 4. Chế độ đăng phải được hỗ trợ.
     if mode == MODE_NICKNAME:
         if not nickname.strip():
-            return _no(status, "Chế độ biệt danh chưa có tên.",
+            return _no(group_verification.NOT_TESTED, "Chế độ biệt danh chưa có tên.",
                         "Chọn tên biệt danh cho group này.", mode)
         if evidence.get("nickname_available") is False:
-            return _no(status, "Facebook không có biệt danh đã cấu hình trong danh sách danh tính.",
+            return _no(group_verification.NOT_TESTED,
+                        "Facebook không có biệt danh đã cấu hình trong danh sách danh tính.",
                         "Xác minh lại chế độ đăng hoặc chọn tên biệt danh khác.", mode)
     elif mode == MODE_ANONYMOUS:
         if evidence.get("supports_anonymous") is False:
-            return _no(status, "Group không hỗ trợ đăng ẩn danh.",
+            return _no(group_verification.NOT_TESTED, "Group không hỗ trợ đăng ẩn danh.",
                         "Xác minh chế độ ẩn danh, hoặc chọn chế độ biệt danh.", mode)
     else:
-        return _no(status, f"Chế độ đăng '{mode}' không hợp lệ.",
+        return _no(group_verification.NOT_TESTED, f"Chế độ đăng '{mode}' không hợp lệ.",
                     "Chọn lại chế độ đăng của group.", mode)
+
+    # 4. Tài khoản phải là thành viên của group. Nếu biết rõ là chưa vào
+    #    group thì không được đăng, và không được coi là chờ duyệt.
+    membership = group_membership.status_of(conn, pipeline_id, account_id, group_id)
+    if membership == group_membership.NOT_MEMBER:
+        return _no(group_verification.NOT_TESTED,
+                    "Tài khoản chưa tham gia group này.",
+                    "Tham gia group bằng tài khoản này rồi thử lại.", mode,
+                    decision=WAITING_MEMBERSHIP)
+    if membership == group_membership.PENDING_APPROVAL:
+        return _no(group_verification.NOT_TESTED,
+                    "Yêu cầu tham gia group đang chờ group duyệt.",
+                    "Chờ group duyệt rồi thử lại.", mode,
+                    decision=WAITING_MEMBERSHIP)
+    if membership == group_membership.JOIN_REJECTED:
+        return _no(group_verification.RESTRICTED_CONFIRMED,
+                    "Group đã từ chối cho tài khoản này tham gia.",
+                    "Dùng tài khoản khác cho group này.", mode,
+                    decision=CONFIRMED_RESTRICTED)
+
+    # 5. Xác định loại kiểm tra: FIRST POST hay RECURRING POST.
+    status = group_verification.servable_status_of(conn, pipeline_id, account_id, group_id, mode)
+
+    # FIRST POST FLOW: Group chưa từng có bằng chứng đăng bài. Bài đầu tiên
+    # chính là lần xác minh thực tế, nên NOT_TESTED không phải lý do chặn.
+    if status == group_verification.NOT_TESTED:
+        return {"eligible": True, "status": group_verification.NOT_TESTED,
+                "reason": "Group chưa từng có bài đăng thật. Bài đầu tiên là lần xác minh.",
+                "action": "Hệ thống sẽ chuẩn bị bài đầu tiên khi bạn bấm Xếp lịch ngay.",
+                "mode": mode, "first_post_eligible": True, "recurring_eligible": False,
+                "decision": FIRST_POST_READY}
+
+    # RECURRING POST FLOW: cặp này phải có bằng chứng đăng bài thật.
+    if not group_verification.is_servable(status):
+        return _no(status, group_screening.guidance_of(evidence, status),
+                    _action_of(status, evidence), mode,
+                    decision=_decision_of(status))
 
     return {"eligible": True, "status": status,
             "reason": group_screening.guidance_of(evidence, status),
-            "action": _action_of(status, evidence), "mode": mode}
+            "action": _action_of(status, evidence), "mode": mode,
+            "first_post_eligible": False, "recurring_eligible": True,
+            "decision": VERIFIED_READY}
 
-
-def _no(status: str, reason: str, action: str, mode: str) -> dict:
+def _no(status: str, reason: str, action: str, mode: str, decision: str = NEEDS_ACTION) -> dict:
     return {"eligible": False, "status": status, "reason": reason, "action": action,
-            "mode": mode}
+            "mode": mode, "recurring_eligible": False, "first_post_eligible": False,
+            "decision": decision}
+
+
+def _decision_of(status: str) -> str:
+    """Trạng thái nghiệp vụ của một cặp đã có bằng chứng."""
+    if status == group_verification.PENDING_GROUP_APPROVAL:
+        return WAITING_APPROVAL
+    if status == group_verification.RESTRICTED_CONFIRMED:
+        return CONFIRMED_RESTRICTED
+    if status == group_verification.REJECTED:
+        return NEEDS_ACTION
+    if status == group_verification.SUBMITTED_UNVERIFIED:
+        return WAITING_APPROVAL
+    if status == group_verification.CHECK_FAILED:
+        return NEEDS_ACTION
+    if status == group_verification.TEST_IN_PROGRESS:
+        return WAITING_APPROVAL
+    return NEEDS_ACTION
 
 
 def _action_of(status: str, evidence: dict) -> str:
@@ -125,7 +225,7 @@ def _action_of(status: str, evidence: dict) -> str:
     if status == group_verification.PENDING_GROUP_APPROVAL:
         return "Bài sẽ cần Admin group duyệt trước khi hiện công khai."
     if status == group_verification.NOT_TESTED:
-        return "Bấm “Xác minh bằng bài đăng” để kiểm chứng quyền đăng."
+        return "Bài đầu tiên sẽ là lần xác minh thực tế của group này."
     if status == group_verification.SUBMITTED_UNVERIFIED:
         return "Đang chờ xác nhận của Facebook; kiểm tra lại sau."
     if status == group_verification.TEST_IN_PROGRESS:
@@ -159,11 +259,16 @@ def _evidence(row) -> dict:
 
 
 def eligible_pairs(conn, pipeline_id: int, groups: list[dict],
-                   account_id: int | None = None) -> list[dict]:
-    """Các cặp Facebook–Group đủ điều kiện đăng tự động.
+                   account_id: int | None = None, first_post: bool = True) -> list[dict]:
+    """Các cặp Facebook–Group đủ điều kiện đăng.
 
     Kết quả là một danh sách group, mỗi group ghi kèm các tài khoản được phép
     đăng vào nó.
+
+    Với ``first_post`` (mặc định) thì group chưa từng có bằng chứng đăng bài
+    cũng được phép, vì bài đầu tiên chính là lần xác minh. Bộ xếp lịch đăng
+    lặp lại thì truyền ``first_post=False`` để chỉ phục vụ group đã có bằng
+    chứng.
     """
     result = []
     for group in groups:
@@ -173,13 +278,16 @@ def eligible_pairs(conn, pipeline_id: int, groups: list[dict],
         allowed = []
         for candidate in candidates:
             decision = pair_decision(conn, pipeline_id, candidate, group["id"], group)
-            if decision["eligible"]:
-                allowed.append(candidate)
+            if not decision["eligible"]:
+                continue
+            if not first_post and not decision.get("recurring_eligible", True):
+                continue
+            allowed.append(candidate)
         if allowed:
             item = dict(group)
             item["eligible_account_ids"] = allowed
             result.append(item)
-    result.sort(key=lambda item: (0 if item.get("screening_status") == group_screening.STATUS_PRIORITY
+    result.sort(key=lambda item: (0 if item.get("screening_status") == group_verification.VERIFIED_POSTED
                                   else 1, item.get("id", 0)))
     return result
 

@@ -233,20 +233,26 @@ def test_no_duplicate_auto_post(client, pictures):
 def test_daily_limit_is_respected(client, pictures):
     pipeline, account, group = make_workspace(client, '@alb11')
     make_media(client, pipeline, account, pictures["one.jpg"])
+    client.post(f'/api/pipelines/{pipeline}/auto-post/config', json={
+        'account_id': account, 'group_ids': [group], 'topic': 'sản phẩm', 'ai_caption': False,
+        'daily_limit': 3, 'require_approval': True, 'enabled': True})
+    # Bai da duoc danh trong ngay cua Workspace, tinh theo mui gio cua no.
     with m.db() as conn:
+        settings = m.posting_limits.settings_of(conn, pipeline)
+        # Chot giua ngay de moi mui gio UTC va mui gio Workspace deu tro ve cung
+        # mot ngay, tranh viec dem sai han muc o ranh giooi.
+        when = m.posting_limits.now_in(settings.get("timezone")).replace(
+            hour=9, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
         conn.execute("UPDATE groups SET screening_status='priority' WHERE id=?", (group,))
         for _ in range(3):
             conn.execute("""INSERT INTO posts(pipeline_id,body,media_json,created_at,anonymous_only)
-                            VALUES(?,?,?,?,1)""", (pipeline, 'x', '[]', m.iso()))
+                            VALUES(?,?,?,?,1)""", (pipeline, 'x', '[]', when))
             post_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             conn.execute("""INSERT INTO jobs(post_id,group_id,account_id,pipeline_id,state,details,
                             scheduled_at,updated_at,requested_posting_mode,posting_status,verification_status)
                             VALUES(?,?,?,?,'posted','',?,?,'anonymous','posted','verified')""",
-                         (post_id, group, account, pipeline, m.iso(), m.iso()))
+                         (post_id, group, account, pipeline, when, when))
         conn.commit()
-    client.post(f'/api/pipelines/{pipeline}/auto-post/config', json={
-        'account_id': account, 'group_ids': [group], 'topic': 'sản phẩm', 'ai_caption': False,
-        'daily_limit': 3, 'require_approval': True, 'enabled': True})
     # Bộ xếp lịch tôn trọng hạn mức của tài khoản ngay khi chuẩn bị bài.
     response = client.post(f'/api/pipelines/{pipeline}/auto-post/schedule')
     assert response.status_code == 201, response.text

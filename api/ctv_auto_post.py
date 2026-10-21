@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from scheduler import ctv_allocator
-from services import ctv_auto_post
+from services import ctv_auto_post, group_targets
 
 PERMISSION_SELF = "auto_post.self_configure"
 
@@ -119,6 +119,10 @@ def build_router(deps: Deps) -> APIRouter:
             _validate_scope(deps, conn, pipeline_id, principal, payload)
             settings = ctv_auto_post.save_settings(conn, pipeline_id, principal.user_id,
                                                    _clean_payload(payload))
+            # CTV chọn group làm mục tiêu đăng thì group đó được phép đặt làm
+            # đích. Việc này không bỏ qua bất kỳ quy định nào của group.
+            group_targets.sync_approved_targets(conn, pipeline_id,
+                                                settings.get("selected_group_ids"))
         deps.audit("auto_post", principal.user_id,
                    "Lưu cấu hình tự động đăng group của CTV", pipeline_id)
         return {"ok": True, "configured": True, "settings": settings}
@@ -170,11 +174,12 @@ def build_router(deps: Deps) -> APIRouter:
 
     @router.get("/api/pipelines/{pipeline_id}/auto-post/ctv-configs")
     def list_ctv_configs(pipeline_id: int, principal=Depends(deps.require_admin)):
-        """Danh sách cấu hình của mọi CTV trong Pipeline."""
+        """Cấu hình tự động đăng của Workspace và danh sách cộng tác viên."""
         with deps.db() as conn:
             deps.entry(conn, "pipelines", pipeline_id)
             configs = ctv_auto_post.list_configs(conn, pipeline_id)
-        return {"ok": True, "configs": configs}
+            collaborators = ctv_auto_post.list_collaborators(conn, pipeline_id)
+        return {"ok": True, "configs": configs, "collaborators": collaborators}
 
     @router.get("/api/pipelines/{pipeline_id}/auto-post/ctv-configs/{ctv_user_id}")
     def get_ctv_config(pipeline_id: int, ctv_user_id: int, principal=Depends(deps.require_admin)):
