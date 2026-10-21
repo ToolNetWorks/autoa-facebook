@@ -22,13 +22,29 @@ export class ApiError extends Error {
 }
 
 /**
+ * The backend answers with a short technical sentence. The ones a customer
+ * can meet are translated, the rest are replaced by a plain message.
+ */
+const TRANSLATED: Record<string, string> = {
+  'Not found': 'Không tìm thấy dữ liệu.',
+  'Evidence not found': 'Không tìm thấy bằng chứng.',
+  'Profile link must use facebook.com HTTPS': 'Link trang cá nhân phải là đường dẫn facebook.com.',
+  'Schedule cannot be in the past': 'Lịch đăng không được nằm trong quá khứ.',
+  'This group is assigned to another Facebook account': 'Group này đang gán cho tài khoản Facebook khác.',
+  'scheduled_at must be ISO 8601 with timezone': 'Thời điểm đăng phải có định dạng ISO 8601 kèm múi giờ.',
+  'Upload exactly one video for Reel/Video': 'Chỉ tải lên đúng một video cho Reel hoặc Video.',
+};
+
+/**
  * A message that can be shown to a customer.
  *
  * The validation report of the backend is technical; it is translated into a
  * short sentence instead of being shown as it is.
  */
 function friendlyMessage(status: number, detail: unknown): string {
-  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (typeof detail === 'string' && detail.trim()) {
+    return TRANSLATED[detail] ?? detail;
+  }
   if (Array.isArray(detail) && detail.length > 0) {
     const first = detail[0] as { type?: string; loc?: (string | number)[] };
     const last = Array.isArray(first.loc) ? first.loc[first.loc.length - 1] : undefined;

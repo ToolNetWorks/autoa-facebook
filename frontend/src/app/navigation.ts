@@ -27,7 +27,7 @@ export const WORKSPACE_NAV: NavSection[] = [
     items: [
       { id: 'groups', label: 'Nhóm Facebook', permission: 'groups.view' },
       { id: 'screening', label: 'Group Screening', permission: 'groups.view' },
-      { id: 'auto-posting', label: 'Tự động đăng group', permission: 'auto_post.configure' },
+      { id: 'auto-posting', label: 'Tự động đăng group', permission: 'auto_post.self_configure' },
       { id: 'group-post', label: 'Tạo bài group', permission: 'group_posts.create' },
       { id: 'reels', label: 'Trang cá nhân · Reels', permission: 'reels.create' },
     ],

@@ -26,12 +26,14 @@ const PERMISSIONS: { id: Permission; label: string }[] = [
   { id: 'media.edit', label: 'Sửa ảnh' },
   { id: 'media.delete', label: 'Xóa ảnh' },
   { id: 'media.approve', label: 'Duyệt ảnh' },
+  { id: 'auto_post.self_configure', label: 'Tự cấu hình tự động đăng của riêng mình' },
   { id: 'auto_post.configure', label: 'Cấu hình tự động đăng' },
   { id: 'auto_post.create', label: 'Tạo bài tự động' },
   { id: 'auto_post.approve', label: 'Duyệt bài tự động' },
   { id: 'auto_post.publish', label: 'Đăng bài tự động' },
   { id: 'history.view', label: 'Xem lịch sử' },
   { id: 'schedule.manage', label: 'Quản lý lịch đăng' },
+  { id: 'analytics.view', label: 'Xem báo cáo phân tích' },
 ];
 
 export function CollaboratorsSection({ workspace }: { workspace: WorkspaceData }) {

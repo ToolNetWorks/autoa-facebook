@@ -1146,6 +1146,42 @@ table.data td.actions {
   gap: var(--sp-2);
 }
 
+/* A long list of choices stays short: it scrolls instead of pushing the rest
+   of the form far down the page. */
+.choice-scroll {
+  max-height: 232px;
+  overflow-y: auto;
+  padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.choice-scroll .choice-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.choice-actions {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.link-btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--fs-12);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.link-btn:hover {
+  color: var(--accent-hover);
+}
+
 .limit-input {
   width: 84px;
   padding: var(--sp-1) var(--sp-2);

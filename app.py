@@ -52,11 +52,15 @@ from services.media_store import (
 )
 from services import analytics as analytics_service
 from services import posting_limits
+from services import ctv_auto_post
+from services import pipeline_scope
 from scheduler import job_allocator
+from scheduler import ctv_allocator
 from scheduler import time_windows
 from services import post_scheduler
 from services import analytics_worker
 from services import media_cloud
+from api import ctv_auto_post as ctv_auto_post_api
 from services.media_fingerprint import file_sha256, hamming_distance, perceptual_signature
 from services.media_probe import ReelPolicy
 from services.video_precheck import (
@@ -760,6 +764,33 @@ def init_db():
     migrate_v8_pipeline_auto_post()
     migrate_v9_posting_schedule()
     migrate_v10_auto_comment()
+    migrate_v11_ctv_auto_post()
+
+
+def migrate_v11_ctv_auto_post():
+    """V11: mỗi CTV có cấu hình tự động đăng group riêng.
+
+    Bảng mới hoàn toàn độc lập với cấu hình chung của Pipeline, nên cấu hình
+    đang chạy của hệ thống được giữ nguyên. Job tự động đăng được ghi thêm
+    chủ sở hữu để truy vết và thống kê đúng cho từng CTV.
+    """
+    with db() as conn:
+        ctv_auto_post.ensure_schema(conn)
+        # CTV đã có sẵn trong hệ thống cần quyền tự thiết lập lịch của riêng mình.
+        # Quyền cấu hình chung của Pipeline vẫn phải được cấp riêng.
+        rows = conn.execute("""SELECT m.id, m.permissions_json FROM pipeline_memberships m
+                               JOIN users u ON u.id=m.user_id
+                               WHERE m.status='active' AND u.role='ctv'""").fetchall()
+        for row in rows:
+            try:
+                permissions = set(json.loads(row["permissions_json"] or "[]"))
+            except (TypeError, ValueError):
+                permissions = set()
+            if "auto_post.self_configure" in permissions:
+                continue
+            permissions.add("auto_post.self_configure")
+            conn.execute("UPDATE pipeline_memberships SET permissions_json=? WHERE id=?",
+                         (json.dumps(sorted(permissions)), row["id"]))
 
 
 def migrate_v10_auto_comment():
@@ -1443,7 +1474,9 @@ class PipelineCreate(BaseModel):
 
 
 class AccountCreate(BaseModel):
-    pipeline_id: int
+    # A collaborator's workspace comes from the session, so the field is only
+    # needed by an administrator who manages more than one workspace.
+    pipeline_id: int | None = None
     label: str = Field(min_length=2, max_length=100)
     profile_url: str = Field(default="", max_length=300)
 
@@ -1613,6 +1646,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Facebook Pipeline Manager", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+# Cấu hình tự động đăng riêng của từng CTV nằm ở module riêng để ``app`` không
+# phải chứa thêm phần xử lý. Các hàm bảo vệ được truyền vào qua ``Deps``.
+app.include_router(ctv_auto_post_api.build_router(ctv_auto_post_api.Deps(
+    db=db,
+    require_principal=require_principal,
+    require_admin=require_admin,
+    require_permission=require_permission,
+    scope_pipeline=scope_pipeline,
+    scoped_entry=scoped_entry,
+    entry=entry,
+    audit=audit,
+    load_ai_config=load_ai_config,
+)))
 
 
 @app.exception_handler(RequestValidationError)
@@ -1845,6 +1892,10 @@ def admin_create_collaborator(data: CollaboratorCreate, principal: Principal = D
         permissions = sorted(normalise_permissions(data.permissions))
     else:
         permissions = sorted(DEFAULT_CTV_PERMISSIONS)
+    # Mỗi CTV luôn được tự thiết lập lịch đăng của riêng mình. Quyền này
+    # không đụng tới cấu hình chung của Workspace, nên vẫn an toàn khi cấp sẵn.
+    if "auto_post.self_configure" not in permissions:
+        permissions = sorted(set(permissions) | {"auto_post.self_configure"})
     with db() as conn:
         entry(conn, "pipelines", data.pipeline_id)
         if conn.execute("SELECT id FROM users WHERE username=?", (data.username.strip(),)).fetchone():
@@ -2331,29 +2382,26 @@ def read_uid(token: str) -> str:
 
 @app.get("/api/accounts")
 def accounts(pipeline_id: int | None = None, principal: Principal = Depends(require_principal)):
+    """The Facebook accounts of one workspace.
+
+    A collaborator always reads their own workspace, taken from the session.
+    A link that still points at another workspace must not empty their list,
+    so the requested id is only honoured for an administrator.
+    """
     require_permission(principal, "facebook.view")
+    try:
+        condition, params = pipeline_scope.scope_list(principal, pipeline_id, "a.pipeline_id",
+                                                          "a.owner_user_id")
+    except pipeline_scope.NoWorkspace:
+        raise HTTPException(403, "Tài khoản chưa được gán Workspace")
     with db() as conn:
         sql = """SELECT a.id,a.pipeline_id,a.label,a.profile_url,a.enabled,a.login_pid,a.created_at,
                         a.auth_method,a.cookie_updated_at,a.session_status,a.session_checked_at,
                         a.session_details,a.fb_name,a.fb_avatar,a.fb_uid_enc,p.name pipeline_name,
                         a.owner_user_id,
                         (SELECT u.username FROM users u WHERE u.id=a.owner_user_id) owner_username
-                 FROM accounts a JOIN pipelines p ON p.id=a.pipeline_id"""
-        params = []
-        conditions = []
-        if pipeline_id:
-            scope_pipeline(principal, pipeline_id)
-            conditions.append("a.pipeline_id=?")
-            params.append(pipeline_id)
-        elif not principal.is_admin:
-            conditions.append("a.pipeline_id=?")
-            params.append(principal.pipeline_id)
-        condition, values = owner_condition(principal, "a")
-        conditions.append(condition)
-        params.extend(values)
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
-        sql += " ORDER BY a.id DESC"
+                 FROM accounts a JOIN pipelines p ON p.id=a.pipeline_id
+                WHERE """ + condition + " ORDER BY a.id DESC"
         result = [dict(row) for row in conn.execute(sql, params)]
     for account in result:
         account["login_open"] = pid_active(account["login_pid"], account["id"])
@@ -2365,20 +2413,30 @@ def accounts(pipeline_id: int | None = None, principal: Principal = Depends(requ
 
 @app.post("/api/accounts", status_code=201)
 def create_account(data: AccountCreate, principal: Principal = Depends(require_principal)):
-    scope_pipeline(principal, data.pipeline_id)
+    """Add one Facebook account to a workspace.
+
+    A collaborator adds to their own workspace, decided by the session. The
+    account stays visible to the whole workspace and to the administrator.
+    """
     require_permission(principal, "facebook.add")
+    try:
+        workspace = pipeline_scope.workspace_for(principal, data.pipeline_id)
+    except pipeline_scope.WorkspaceRequired:
+        raise HTTPException(422, "Thiếu pipeline_id")
+    except pipeline_scope.NoWorkspace:
+        raise HTTPException(403, "Tài khoản chưa được gán Workspace")
     if data.profile_url:
         parsed = urlparse(data.profile_url)
         if parsed.scheme != "https" or parsed.hostname not in ("facebook.com", "www.facebook.com", "m.facebook.com"):
             raise HTTPException(422, "Profile link must use facebook.com HTTPS")
     with db() as conn:
-        entry(conn, "pipelines", data.pipeline_id)
+        entry(conn, "pipelines", workspace)
         result = conn.execute("""INSERT INTO accounts(pipeline_id,label,profile_url,created_at,owner_user_id)
                                  VALUES(?,?,?,?,?)""",
-                              (data.pipeline_id, data.label, data.profile_url, iso(),
+                              (workspace, data.label, data.profile_url, iso(),
                                resource_owner(principal)))
         created_id = result.lastrowid
-    audit("account", created_id, "Added account (local browser profile)", data.pipeline_id)
+    audit("account", created_id, "Added account (local browser profile)", workspace)
     return {"id": created_id}
 
 
@@ -4093,11 +4151,28 @@ def publish_auto_post_jobs() -> None:
                 if account["pipeline_id"] != group["pipeline_id"]:
                     raise ValueError("Tài khoản và group không cùng Workspace")
                 settings = posting_limits.settings_of(conn, job["pipeline_id"])
+                ctv_id = job.get("created_by_ctv_id")
+                ctv_settings = None
+                if ctv_id:
+                    ctv_settings = ctv_auto_post.settings_of(conn, job["pipeline_id"], ctv_id)
+                    if ctv_settings:
+                        rules = ctv_settings.get("schedule_rules") or {}
+                        settings = {**settings,
+                                    "min_gap_minutes": max(
+                                        int(settings.get("min_gap_minutes") or 0),
+                                        int(rules.get("min_gap_minutes") or 0))}
                 state = posting_limits.account_state(conn, account["id"], settings)
                 if state["at_limit"]:
                     raise ValueError(f"Đã đạt giới hạn {state['daily_limit']} bài/ngày của tài khoản")
                 if state["next_allowed_at"]:
                     raise ValueError("Chưa đủ khoảng cách tối thiểu giữa hai bài")
+                if ctv_id and ctv_settings:
+                    own_limit = int(ctv_settings.get("max_posts_per_account_daily") or 0)
+                    day = posting_limits.day_of(posting_limits.now_in(
+                        ctv_settings.get("timezone")))
+                    if own_limit and ctv_auto_post.usage_of(
+                            conn, job["pipeline_id"], ctv_id, account["id"], day) > own_limit:
+                        raise ValueError(f"CTV đã đủ {own_limit} bài/ngày trên tài khoản này")
                 if posting_limits.is_paused(conn, account["id"]):
                     raise ValueError("Tài khoản Facebook đang tạm dừng")
                 duplicate = conn.execute("""SELECT COUNT(*) FROM jobs WHERE group_id=? AND account_id=?
@@ -4125,15 +4200,18 @@ def publish_auto_post_jobs() -> None:
                 analysis = analyze_caption(caption)
                 if any(issue.severity == "high" for issue in analysis.issues):
                     raise ValueError("Caption vi phạm chính sách")
-                post = conn.execute("""INSERT INTO posts(pipeline_id,body,media_json,created_at,anonymous_only)
-                    VALUES(?,?,?,?,1)""", (job["pipeline_id"], caption, json.dumps([media_path]), iso()))
+                post = conn.execute("""INSERT INTO posts(pipeline_id,body,media_json,created_at,
+                                     anonymous_only,owner_user_id)
+                    VALUES(?,?,?,?,1,?)""",
+                    (job["pipeline_id"], caption, json.dumps([media_path]), iso(), ctv_id))
                 post_id = post.lastrowid
                 conn.execute("""INSERT INTO jobs
                     (post_id,group_id,account_id,pipeline_id,state,details,scheduled_at,updated_at,
-                     requested_posting_mode,requested_nickname,posting_status,verification_status)
-                    VALUES(?,?,?,?,'queued','',?,?,?,?,'pending','unverified')""",
+                     requested_posting_mode,requested_nickname,posting_status,verification_status,
+                     created_by_ctv_id)
+                    VALUES(?,?,?,?,'queued','',?,?,?,?,'pending','unverified',?)""",
                     (post_id, group["id"], account["id"], job["pipeline_id"], iso(), iso(),
-                     job["posting_mode"], job["nickname"]))
+                     job["posting_mode"], job["nickname"], ctv_id))
                 conn.execute("""UPDATE auto_post_jobs SET status='queued', updated_at=? WHERE id=?""",
                              (iso(), job["id"]))
                 conn.execute("""INSERT INTO media_usage_history
@@ -4166,7 +4244,12 @@ def auto_post_worker():
 
 
 def prepare_auto_post_jobs() -> None:
-    """Chia công việc cho các tài khoản Facebook của các Workspace đang bật."""
+    """Chia công việc cho các tài khoản Facebook của các Workspace đang bật.
+
+    Một Workspace có thể có nhiều cấu hình cùng lúc: cấu hình chung của quản
+    trị và cấu hình riêng của từng CTV. Mỗi cấu hình được xếp lịch riêng nhưng
+    cùng chịu các quy tắc an toàn của cả Pipeline.
+    """
     with db() as conn:
         pipelines = conn.execute("""SELECT pipeline_id FROM pipeline_auto_post_settings
                                    WHERE enabled=1""").fetchall()
@@ -4184,6 +4267,21 @@ def prepare_auto_post_jobs() -> None:
                              row["pipeline_id"], len(outcome["created"]))
             except Exception as error:
                 LOG.warning("Không xếp lịch được pipeline %s: %s", row["pipeline_id"],
+                            type(error).__name__)
+    # Cấu hình riêng của từng CTV, không phụ thuộc cấu hình chung của quản trị.
+    with db() as conn:
+        ctv_pipelines = conn.execute("""SELECT DISTINCT pipeline_id FROM ctv_auto_post_settings
+                                        WHERE enabled=1""").fetchall()
+    for row in ctv_pipelines:
+        with db() as conn:
+            try:
+                outcome = ctv_allocator.allocate(conn, row["pipeline_id"],
+                                                 provider_config=provider_config, max_jobs=20)
+                if outcome.get("created"):
+                    LOG.info("Pipeline %s: xếp lịch %d bài cho CTV",
+                             row["pipeline_id"], len(outcome["created"]))
+            except Exception as error:
+                LOG.warning("Không xếp lịch được CTV của pipeline %s: %s", row["pipeline_id"],
                             type(error).__name__)
 
 
@@ -4575,26 +4673,41 @@ def auto_comment_stats(pipeline_id: int, principal: Principal = Depends(require_
 
 
 # =============================================================================
+@app.get("/api/pipelines/{pipeline_id}/groups")
 def pipeline_groups(pipeline_id: int, principal: Principal = Depends(require_principal)):
-    """Every group of one workspace with its counters."""
+    """Every group of one workspace with its counters.
+
+    A collaborator reads the groups of their own workspace, taken from the
+    session, and sees exactly the rows the administrator sees there.
+    """
     require_permission(principal, "groups.view")
-    scope_pipeline(principal, pipeline_id)
+    try:
+        condition, params = pipeline_scope.scope_list(principal, pipeline_id, "g.pipeline_id",
+                                                      "g.owner_user_id")
+    except pipeline_scope.NoWorkspace:
+        raise HTTPException(403, "Tài khoản chưa được gán Workspace")
     with db() as conn:
-        entry(conn, "pipelines", pipeline_id)
-        condition, values = owner_condition(principal, "g")
         rows = conn.execute(f"""SELECT g.*, a.label account_label FROM groups g
                                LEFT JOIN accounts a ON a.id=g.account_id
-                               WHERE g.pipeline_id=? AND {condition} ORDER BY g.id DESC""",
-                            (pipeline_id, *values)).fetchall()
+                               WHERE {condition} ORDER BY g.id DESC""", params).fetchall()
         return [group_payload(conn, row, principal) for row in rows]
 
 
 @app.post("/api/pipelines/{pipeline_id}/groups", status_code=201)
 def add_pipeline_group(pipeline_id: int, data: GroupCreate, principal: Principal = Depends(require_principal)):
-    """Add one group to a workspace."""
+    """Add one group to a workspace.
+
+    A collaborator adds to the workspace of their session, so a link left over
+    from another workspace cannot put their group in the wrong place.
+    """
     require_permission(principal, "groups.manage")
-    scope_pipeline(principal, pipeline_id)
-    if data.pipeline_id != pipeline_id:
+    try:
+        workspace = pipeline_scope.workspace_for(principal, pipeline_id)
+    except pipeline_scope.WorkspaceRequired:
+        raise HTTPException(422, "Thiếu pipeline_id")
+    except pipeline_scope.NoWorkspace:
+        raise HTTPException(403, "Tài khoản chưa được gán Workspace")
+    if data.pipeline_id is not None and data.pipeline_id != workspace:
         raise HTTPException(404, "Not found")
     try:
         url, group_key = normalize_group_url(data.url)
@@ -4604,32 +4717,32 @@ def add_pipeline_group(pipeline_id: int, data: GroupCreate, principal: Principal
     if data.posting_mode == "nickname" and not data.nickname.strip():
         raise HTTPException(422, "Chế độ biệt danh cần có tên biệt danh đã cấu hình")
     with db() as conn:
-        entry(conn, "pipelines", pipeline_id)
+        entry(conn, "pipelines", workspace)
         account = scoped_entry(conn, "accounts", data.account_id, principal)
-        if account["pipeline_id"] != pipeline_id:
+        if account["pipeline_id"] != workspace:
             raise HTTPException(404, "Not found")
-        if group_already_present(conn, pipeline_id, group_key, aliases):
+        if group_already_present(conn, workspace, group_key, aliases):
             raise HTTPException(409, "Group này đã có trong Workspace")
         label = data.label.strip() or group_display_name(url)
         cursor = conn.execute("""INSERT INTO groups
             (pipeline_id,account_id,label,url,group_key,enabled,approved_target,created_at,
              group_name,posting_mode,nickname,status,source_key,owner_user_id)
             VALUES(?,?,?,?,?,1,?,?,?,?,?,'active',?,?)""",
-            (pipeline_id, data.account_id, label, url, group_key, int(data.approved_target),
+            (workspace, data.account_id, label, url, group_key, int(data.approved_target),
              iso(), label, data.posting_mode, data.nickname.strip(),
              ",".join(sorted(set([group_key] + aliases))), resource_owner(principal)))
         group_id = cursor.lastrowid
-        upsert_group_account(conn, pipeline_id, group_id, data.account_id,
+        upsert_group_account(conn, workspace, group_id, data.account_id,
                              data.posting_mode, data.nickname.strip())
         for extra in data.account_ids:
             if extra == data.account_id:
                 continue
             other = scoped_entry(conn, "accounts", extra, principal)
-            if other["pipeline_id"] != pipeline_id:
+            if other["pipeline_id"] != workspace:
                 raise HTTPException(404, "Not found")
-            upsert_group_account(conn, pipeline_id, group_id, extra, data.posting_mode,
+            upsert_group_account(conn, workspace, group_id, extra, data.posting_mode,
                                  data.nickname.strip())
-    audit("group", group_id, f"Thêm group {label}", pipeline_id)
+    audit("group", group_id, f"Thêm group {label}", workspace)
     with db() as conn:
         row = conn.execute("SELECT * FROM groups WHERE id=?", (group_id,)).fetchone()
         return group_payload(conn, row)
@@ -4977,42 +5090,44 @@ def create_group_post(pipeline_id: int, data: GroupPostCreate, principal: Princi
 
 @app.get("/api/groups")
 def groups(pipeline_id: int | None = None, principal: Principal = Depends(require_principal)):
+    """The groups of one workspace.
+
+    A collaborator reads the groups of their own workspace, taken from the
+    session, and sees exactly the rows the administrator sees there.
+    """
     require_permission(principal, "groups.view")
+    try:
+        condition, params = pipeline_scope.scope_list(principal, pipeline_id, "g.pipeline_id",
+                                                          "g.owner_user_id")
+    except pipeline_scope.NoWorkspace:
+        raise HTTPException(403, "Tài khoản chưa được gán Workspace")
     with db() as conn:
         sql = """SELECT g.*, a.label account_label, p.name pipeline_name,
                         (SELECT u.username FROM users u WHERE u.id=g.owner_user_id) owner_username
-                 FROM groups g JOIN accounts a ON a.id=g.account_id JOIN pipelines p ON p.id=g.pipeline_id"""
-        params = []
-        conditions = []
-        if pipeline_id:
-            scope_pipeline(principal, pipeline_id)
-            conditions.append("g.pipeline_id=?")
-            params.append(pipeline_id)
-        elif not principal.is_admin:
-            conditions.append("g.pipeline_id=?")
-            params.append(principal.pipeline_id)
-        condition, values = owner_condition(principal, "g")
-        conditions.append(condition)
-        params.extend(values)
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
-        sql += " ORDER BY g.id DESC"
+                 FROM groups g JOIN accounts a ON a.id=g.account_id JOIN pipelines p ON p.id=g.pipeline_id
+                WHERE """ + condition + " ORDER BY g.id DESC"
         return [dict(row) for row in conn.execute(sql, params)]
 
 
 @app.post("/api/groups", status_code=201)
 def create_group(data: GroupCreate, principal: Principal = Depends(require_principal)):
-    scope_pipeline(principal, data.pipeline_id)
+    """Add one group to the workspace of the caller."""
     require_permission(principal, "groups.manage")
+    try:
+        workspace = pipeline_scope.workspace_for(principal, data.pipeline_id)
+    except pipeline_scope.WorkspaceRequired:
+        raise HTTPException(422, "Thiếu pipeline_id")
+    except pipeline_scope.NoWorkspace:
+        raise HTTPException(403, "Tài khoản chưa được gán Workspace")
     link, key = group_link(data.url)
     with db() as conn:
-        entry(conn, "pipelines", data.pipeline_id)
+        entry(conn, "pipelines", workspace)
         account = scoped_entry(conn, "accounts", data.account_id, principal)
-        if account["pipeline_id"] != data.pipeline_id:
+        if account["pipeline_id"] != workspace:
             raise HTTPException(404, "Not found")
         try:
             result = conn.execute("""INSERT INTO groups(pipeline_id,account_id,label,url,group_key,approved_target,created_at,owner_user_id)
-                        VALUES(?,?,?,?,?,?,?,?)""", (data.pipeline_id, data.account_id, data.label, link,
+                        VALUES(?,?,?,?,?,?,?,?)""", (workspace, data.account_id, data.label, link,
                                                       key, int(data.approved_target), iso(),
                                                       resource_owner(principal)))
         except sqlite3.IntegrityError as error:

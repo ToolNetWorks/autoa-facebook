@@ -24,7 +24,9 @@ export type Permission =
   | 'auto_post.configure'
   | 'auto_post.create'
   | 'auto_post.approve'
-  | 'auto_post.publish';
+  | 'auto_post.publish'
+  | 'auto_post.self_configure'
+  | 'analytics.view';
 
 export interface Session {
   role: Role;
@@ -231,6 +233,79 @@ export interface AutoPostJob {
   status: string;
   error: string;
   created_at: string;
+}
+
+/** The advanced rules of one collaborator's own automatic posting. */
+export interface CtvAutoPostRules {
+  days_enabled: number[];
+  min_gap_minutes: number;
+  group_daily_limit: number;
+  image_selection_rule: 'rotate' | 'unused_first' | 'random';
+}
+
+/** The configuration of one collaborator, scoped to pipeline + user. */
+export interface CtvAutoPostSettings {
+  id?: number;
+  pipeline_id: number | null;
+  ctv_user_id: number | null;
+  enabled: boolean;
+  account_scope: 'all' | 'selected';
+  selected_account_ids: number[];
+  selected_group_ids: number[];
+  topic: string;
+  caption_template: string;
+  max_posts_per_account_daily: number;
+  start_time: string;
+  end_time: string;
+  timezone: string;
+  schedule_rules: CtvAutoPostRules;
+  ai_caption_enabled: boolean;
+  approval_required: boolean;
+  anti_duplicate: boolean;
+  apply_to_new_accounts: boolean;
+  created_at?: string;
+  updated_at?: string;
+  username?: string;
+}
+
+/** The limits of the pipeline that a collaborator may not go beyond. */
+export interface CtvAutoPostPolicy {
+  daily_limit_per_account: number;
+  min_gap_minutes: number;
+  pipeline_daily_limit: number;
+}
+
+export interface CtvAutoPostOwner {
+  user_id: number;
+  username: string;
+  role: Role;
+  status: string;
+  membership_status: string | null;
+  is_member: boolean;
+}
+
+/** The answer of the "my configuration" endpoint. */
+export interface CtvAutoPostConfig {
+  ok: boolean;
+  configured: boolean;
+  settings: CtvAutoPostSettings;
+  owner?: CtvAutoPostOwner | null;
+  policy?: CtvAutoPostPolicy;
+}
+
+export interface CtvAutoPostJob {
+  id: number;
+  pipeline_id: number;
+  account_id: number | null;
+  group_id: number | null;
+  media_id: number | null;
+  status: string;
+  caption: string;
+  scheduled_for: string | null;
+  created_at: string;
+  created_by_ctv_id: number | null;
+  group_label: string | null;
+  account_label: string | null;
 }
 
 export interface PrecheckIssue {

@@ -65,14 +65,18 @@ PERMISSIONS = (
     "auto_post.create",
     "auto_post.approve",
     "auto_post.publish",
+    "auto_post.self_configure",
     "analytics.view",
 )
 
 # A new collaborator may look around and prepare drafts. Anything that
 # publishes or touches credentials must be granted explicitly by an admin.
+# A collaborator always configures their own automatic posting, so the
+# permission for that is part of the defaults; the shared configuration of
+# the pipeline stays behind "auto_post.configure".
 DEFAULT_CTV_PERMISSIONS = ("facebook.view", "facebook.add", "groups.view", "groups.manage",
                            "media.view", "media.upload", "media.edit", "media.delete",
-                           "history.view", "group_posts.create")
+                           "history.view", "group_posts.create", "auto_post.self_configure")
 
 PUBLISHING_PERMISSIONS = ("group_posts.publish", "reels.publish")
 

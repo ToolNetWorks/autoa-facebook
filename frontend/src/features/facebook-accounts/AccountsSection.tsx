@@ -4,7 +4,7 @@ import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Field';
 import { Modal } from '@/components/ui/Modal';
-import { Alert, Badge, Card, DataTable, EmptyState } from '@/components/ui/Surfaces';
+import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Skeleton } from '@/components/ui/Surfaces';
 import { usePermissions } from '@/hooks/usePermissions';
 import type { FacebookAccount } from '@/types/api';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
@@ -96,6 +96,7 @@ export function AccountsSection({ workspace }: { workspace: WorkspaceData }) {
   }
 
   const accounts = workspace.accounts;
+  const { loading, error } = workspace.accountsState;
 
   return (
     <div className="stack">
@@ -108,7 +109,20 @@ export function AccountsSection({ workspace }: { workspace: WorkspaceData }) {
         ) : null}
       </div>
 
-      {accounts.length === 0 ? (
+      {error ? (
+        <ErrorState
+          title="Không thể tải tài khoản. Vui lòng thử lại."
+          action={
+            <Button size="sm" onClick={() => workspace.reloadAccounts()}>
+              Thử lại
+            </Button>
+          }
+        />
+      ) : loading && accounts.length === 0 ? (
+        <Card>
+          <Skeleton variant="block" />
+        </Card>
+      ) : accounts.length === 0 ? (
         <EmptyState
           title="Chưa có tài khoản Facebook"
           description="Thêm tài khoản rồi đăng nhập bằng trình duyệt hoặc nạp cookie JSON của chính bạn."

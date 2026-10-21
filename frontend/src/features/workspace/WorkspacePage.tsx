@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/app/AuthProvider';
 import { visibleEntries, WORKSPACE_NAV } from '@/app/navigation';
@@ -20,6 +21,7 @@ import { HistorySection } from '@/features/history/HistorySection';
 import { CollaboratorsSection } from '@/features/collaborators/CollaboratorsSection';
 import { AccessKeysSection } from '@/features/access-keys/AccessKeysSection';
 import { SettingsSection } from '@/features/settings/SettingsSection';
+import { Button } from '@/components/ui/Button';
 import type { Permission } from '@/types/api';
 
 const SECTION_TITLES: Record<string, string> = {
@@ -45,8 +47,22 @@ const SECTION_TITLES: Record<string, string> = {
 export function WorkspacePage({ pipelineId, section }: { pipelineId?: string; section: string }) {
   const navigate = useNavigate();
   const { session, isAdmin, can } = useAuth();
-  const id = Number(pipelineId ?? session?.pipeline_id ?? 0) || null;
+  const requested = Number(pipelineId ?? 0) || null;
+  const mine = session?.pipeline_id ?? null;
+
+  // A collaborator is pinned to one workspace. A link left over from another
+  // session must not send them to a workspace they may not see, so the URL is
+  // corrected to their own workspace before anything is loaded.
+  const foreign = !isAdmin && requested !== null && mine !== null && requested !== mine;
+  const id = isAdmin ? requested : mine;
+
   const workspace = useWorkspace(id);
+
+  useEffect(() => {
+    if (foreign && mine) {
+      navigate(`/workspace/${mine}/${section || 'overview'}`, { replace: true });
+    }
+  }, [foreign, mine, section, navigate]);
 
   const nav = visibleEntries(WORKSPACE_NAV, { isAdmin, can: can as (permission: Permission) => boolean });
   const allowed = nav.some((entry) => entry.items.some((item) => item.id === section));
@@ -57,6 +73,37 @@ export function WorkspacePage({ pipelineId, section }: { pipelineId?: string; se
   }
 
   const pipelineName = workspace.pipeline?.name ?? 'Workspace';
+
+  if (isAdmin && !id) {
+    return (
+      <AppShell
+        nav={nav}
+        activeId="overview"
+        onNavigate={go}
+        title="Chọn Workspace"
+        backTo={{ label: 'Dashboard', to: '/' }}
+      >
+        <div className="card">
+          <div className="stack">
+            <p className="hint">Chọn một Workspace để xem và cấu hình tự động đăng group.</p>
+            {workspace.pipeline ? null : (
+              <p className="hint">Chưa có Workspace nào. Tạo Workspace ở trang Dashboard.</p>
+            )}
+            <div className="btn-row">
+              {workspace.pipelines.map((item) => (
+                <Button
+                  key={item.id}
+                  onClick={() => navigate(`/workspace/${item.id}/auto-posting`)}
+                >
+                  {item.name}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </AppShell>
+    );
+  }
 
   const body = (() => {
     switch (active) {

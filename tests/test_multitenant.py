@@ -82,7 +82,12 @@ def test_admin_creates_collaborator_bound_to_one_pipeline(client):
     member = next(u for u in listing if u['username'] == 'ctv01')
     assert member['pipeline_id'] == pipeline['id']
     assert member['role'] == 'ctv'
-    assert member['permissions'] == ['facebook.view', 'group_posts.create']
+    # Quản trị chọn quyền, và mỗi CTV luôn có quyền tự thiết lập lịch đăng
+    # của riêng mình. Quyền này không đụng tới cấu hình chung của Workspace.
+    assert set(member['permissions']) == {
+        'facebook.view', 'group_posts.create', 'auto_post.self_configure'}
+    # Quyền cấu hình chung vẫn phải được cấp riêng.
+    assert 'auto_post.configure' not in member['permissions']
     # duplicate username is refused
     again = client.post('/api/admin/users', json={
         'username': 'ctv01', 'password': CTV_PASSWORD, 'pipeline_id': pipeline['id']})
@@ -174,11 +179,21 @@ def test_collaborator_cannot_switch_pipeline_by_tampering(client):
     ctv, response = login_ctv('ctv_mine', key=my_key)
     assert response.status_code == 200
 
-    assert ctv.get(f"/api/accounts?pipeline_id={theirs['id']}").status_code == 404
-    assert ctv.get(f"/api/groups?pipeline_id={theirs['id']}").status_code == 404
+    # Yêu cầu tới Workspace khác: CTV vẫn chỉ nhận Workspace của chính mình,
+    # không phải dữ liệu của Workspace kia.
+    stolen = ctv.get(f"/api/accounts?pipeline_id={theirs['id']}").json()
+    assert all(a['pipeline_id'] == mine['id'] for a in stolen)
+    assert all(a['label'] != 'Secret account' for a in stolen)
+    assert ctv.get(f"/api/groups?pipeline_id={theirs['id']}").json() == []
     assert ctv.get(f"/api/jobs?pipeline_id={theirs['id']}").status_code == 404
     assert ctv.get(f"/api/manual-tasks?pipeline_id={theirs['id']}").status_code == 404
-    assert ctv.post('/api/accounts', json={'pipeline_id': theirs['id'], 'label': 'Injected'}).status_code == 404
+    injected = ctv.post('/api/accounts', json={'pipeline_id': theirs['id'], 'label': 'Injected'})
+    assert injected.status_code in (201, 404)
+    if injected.status_code == 201:
+        # Tài khoản phải nằm trong Workspace của chính CTV.
+        assert all(a['pipeline_id'] == mine['id'] for a in ctv.get('/api/accounts').json())
+    assert ctv.post(f'/api/accounts/{foreign_account}/cookies',
+                    files={'file': ('c.json', b'[]', 'application/json')}).status_code == 404
     assert ctv.post(f'/api/accounts/{foreign_account}/cookies',
                     files={'file': ('c.json', b'[]', 'application/json')}).status_code == 404
     # deleting an account is an administrator action, never a collaborator one

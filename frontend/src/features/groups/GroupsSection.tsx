@@ -4,7 +4,7 @@ import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Field';
 import { Modal } from '@/components/ui/Modal';
-import { Alert, Badge, Card, DataTable, EmptyState, Tabs } from '@/components/ui/Surfaces';
+import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Tabs } from '@/components/ui/Surfaces';
 import { Radio } from '@/components/ui/Choice';
 import { usePermissions } from '@/hooks/usePermissions';
 import type { GroupRow } from '@/types/api';
@@ -228,7 +228,16 @@ export function GroupsSection({ workspace }: { workspace: WorkspaceData }) {
         onChange={setFilter}
       />
 
-      {groups.length === 0 ? (
+      {workspace.groupsState.error ? (
+        <ErrorState
+          title="Không thể tải danh sách group. Vui lòng thử lại."
+          action={
+            <Button size="sm" onClick={() => workspace.reloadGroups()}>
+              Thử lại
+            </Button>
+          }
+        />
+      ) : groups.length === 0 ? (
         <EmptyState title="Chưa có group nào" description="Thêm group bằng link để bắt đầu." />
       ) : (
         <Card>
