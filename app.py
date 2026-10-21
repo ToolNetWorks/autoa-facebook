@@ -48,12 +48,14 @@ from services.auto_posting import (
 from services.image_analysis import analyze_image
 from services.image_selection import score_candidate
 from services.media_store import (
-    StorageError, album_root, delete_media, pipeline_folder, safe_join, store_image,
+    album_root, pipeline_folder, safe_join,
 )
 from services import analytics as analytics_service
 from services import posting_limits
 from services import ctv_auto_post
 from services import pipeline_scope
+from services import media_service
+from services import media_status
 from scheduler import job_allocator
 from scheduler import ctv_allocator
 from scheduler import time_windows
@@ -61,17 +63,23 @@ from services import post_scheduler
 from services import analytics_worker
 from services import media_cloud
 from api import ctv_auto_post as ctv_auto_post_api
+from api import media as media_api
+from api import groups as groups_api
+from api import verification as verification_api
 from services.media_fingerprint import file_sha256, hamming_distance, perceptual_signature
 from services.media_probe import ReelPolicy
 from services.video_precheck import (
     CATEGORIES as PRECHECK_CATEGORIES, FINAL_BLOCKED, FINAL_CHECK_FAILED,
     FINAL_NEEDS_REVIEW, FINAL_PASS, run_precheck,
 )
+from services import group_screening
+from services import group_verification
+from services import group_membership
+from services import group_eligibility
+from services import group_join_worker
 from services.group_screening import (
-    FRESHNESS_DAYS, MIN_CHECK_INTERVAL_SECONDS, RECHECK_COOLDOWN_SECONDS, STATUS_FAILED,
-    STATUS_LABELS, STATUS_PRIORITY, STATUS_REVIEW, STATUS_RESTRICTED, STATUS_UNKNOWN,
-    build_evidence, classify, evidence_summary, is_fresh, is_publishable, priority_index,
-    screening_payload,
+    FRESHNESS_DAYS, MIN_CHECK_INTERVAL_SECONDS, RECHECK_COOLDOWN_SECONDS,
+    build_evidence, classify, evidence_summary,
 )
 from services.group_links import (
     InvalidGroupLink, group_alias_keys, group_display_name, normalize_group_url, sql_like_escape,
@@ -765,6 +773,51 @@ def init_db():
     migrate_v9_posting_schedule()
     migrate_v10_auto_comment()
     migrate_v11_ctv_auto_post()
+    migrate_v12_screening_classification()
+    migrate_v13_post_verification()
+
+
+def migrate_v13_post_verification():
+    """V13: xác minh quyền đăng bằng bằng chứng đăng bài thật.
+
+    Bảng bằng chứng và bảng tư cách thành viên là mới, nên không có dữ liệu
+    nào bị mất. Kết quả kiểm tra cũ **không** được biến thành đã xác minh: một
+    lần kiểm tra bằng trình duyệt không phải là bằng chứng đăng bài.
+    """
+    with db() as conn:
+        group_verification.ensure_schema(conn)
+        group_membership.ensure_schema(conn)
+        job_columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "is_verification" not in job_columns:
+            # Bài xác minh là bài đang tự kiểm chứng, nên nó được phép đi
+            # trước khi cặp Facebook–Group có bằng chứng.
+            conn.execute("ALTER TABLE jobs ADD COLUMN is_verification INTEGER NOT NULL DEFAULT 0")
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
+        if "auto_join" not in columns:
+            conn.execute("ALTER TABLE groups ADD COLUMN auto_join INTEGER NOT NULL DEFAULT 0")
+        if "join_answers_json" not in columns:
+            conn.execute("""ALTER TABLE groups ADD COLUMN join_answers_json TEXT NOT NULL
+                            DEFAULT '{}'""")
+        conn.execute("""CREATE INDEX IF NOT EXISTS idx_groups_auto_join
+                        ON groups(pipeline_id, auto_join)""")
+        # Group chưa có bằng chứng đăng bài thì bắt đầu ở trạng thái chưa xác minh.
+        conn.execute("""UPDATE groups SET screening_status=? WHERE screening_status NOT IN
+                        ('verified_posted','pending_group_approval','submitted_unverified',
+                         'test_in_progress','rejected','restricted_confirmed','check_failed')""",
+                     (group_verification.NOT_TESTED,))
+
+
+def migrate_v12_screening_classification():
+    """V12: phân loại lại kết quả kiểm tra group theo bằng chứng đang có.
+
+    Trước đây "chưa tham gia group" và "không thấy ô soạn bài" bị ghi thành
+    "Facebook hạn chế quyền đăng". Bằng chứng không thay đổi, chỉ cách đọc
+    nó, nên không có dữ liệu nào bị mất.
+    """
+    with db() as conn:
+        changed = group_screening.reclassify_stored(conn)
+    if changed:
+        LOG.info("Phan loai lai %d ket qua kiem tra group", changed)
 
 
 def migrate_v11_ctv_auto_post():
@@ -1209,19 +1262,12 @@ def grant_collaborator_ownership(connection) -> None:
 
 def album_scope_label(conn, row) -> str:
     """The folder of an album picture: the owner, or the shared pool."""
-    owner = row["owner_user_id"] if "owner_user_id" in row.keys() else None
-    if not owner:
-        return media_cloud.SHARED_SCOPE
-    user = conn.execute("SELECT username FROM users WHERE id=?", (owner,)).fetchone()
-    return user["username"] if user else media_cloud.SHARED_SCOPE
+    return media_service.album_scope_label(conn, row)
 
 
 def album_remote_key(conn, row, key: str = "") -> str:
     """The key of a picture inside the bucket of the album."""
-    pipeline = conn.execute("SELECT name FROM pipelines WHERE id=?",
-                             (row["pipeline_id"],)).fetchone()
-    name = pipeline["name"] if pipeline else str(row["pipeline_id"])
-    return media_cloud.remote_key(name, album_scope_label(conn, row), key or row["storage_key"])
+    return media_service.album_remote_key(conn, row, key)
 
 
 def album_bytes(conn, row, key: str = "") -> bytes | None:
@@ -1230,21 +1276,7 @@ def album_bytes(conn, row, key: str = "") -> bytes | None:
     A picture that was uploaded before the cloud was configured is still read
     from the local album, so nothing disappears while the bucket fills up.
     """
-    storage_key = key or row["storage_key"]
-    if media_cloud.enabled():
-        payload = media_cloud.get_bytes(album_remote_key(conn, row, storage_key))
-        if payload is not None:
-            return payload
-    try:
-        path = safe_join(DATA, storage_key)
-    except StorageError:
-        return None
-    if not path.is_file():
-        return None
-    try:
-        return path.read_bytes()
-    except OSError:
-        return None
+    return media_service.album_bytes(conn, row, DATA, key)
 
 
 def audit(category: str, entity_id: int | None, message: str, pipeline_id: int | None = None):
@@ -1634,6 +1666,8 @@ async def lifespan(app: FastAPI):
     autoworker.start()
     analyticsthread = threading.Thread(target=analytics_thread, daemon=True, name="analytics")
     analyticsthread.start()
+    joinworker = threading.Thread(target=group_join_worker_thread, daemon=True, name="group-join")
+    joinworker.start()
     yield
     STOP_EVENT.set()
     worker.join(timeout=2)
@@ -1656,6 +1690,18 @@ app.include_router(ctv_auto_post_api.build_router(ctv_auto_post_api.Deps(
     require_permission=require_permission,
     scope_pipeline=scope_pipeline,
     scoped_entry=scoped_entry,
+    entry=entry,
+    audit=audit,
+    load_ai_config=load_ai_config,
+)))
+
+# Album ảnh nằm ở module riêng để ``app`` không phải chứa thêm phần xử lý.
+app.include_router(media_api.build_router(media_api.Deps(
+    db=db,
+    iso=iso,
+    data_root=lambda: DATA,
+    require_principal=require_principal,
+    require_permission=require_permission,
     entry=entry,
     audit=audit,
     load_ai_config=load_ai_config,
@@ -2747,11 +2793,10 @@ def screening_row(conn, account_id: int, group_id: int):
 def store_screening_result(conn, pipeline_id: int, account_id: int, group_id: int,
                            check: dict | None = None, source_override: str = "",
                            status_override: str = "") -> dict:
-    """Classify a group from its evidence and store the result.
+    """Lưu quan sát của trình duyệt về một cặp Facebook–Group.
 
-    The check argument holds what the browser observed. The posting history of
-    the account in that group is always added, so a later post can change the
-    classification without another browser run.
+    Kết luận về quyền đăng không nằm ở đây. Nó nằm ở bảng bằng chứng
+    ``group_post_verifications`` và chỉ được đưa ra sau một lần gửi bài thật.
     """
     evidence = build_evidence(conn, pipeline_id, account_id, group_id, check)
     status, source, confidence = classify(evidence)
@@ -2795,11 +2840,120 @@ def store_screening_result(conn, pipeline_id: int, account_id: int, group_id: in
                   evidence.get("last_rejected_post_at"), evidence.get("direct_posts", 0),
                   evidence.get("pending_posts", 0), evidence.get("rejected_posts", 0),
                   evidence_summary(evidence), now, now))
-    # the group keeps a copy of the state of its assigned account
-    conn.execute("""UPDATE groups SET screening_status=?, screening_source=?, screening_confidence=?,
-                    screening_checked_at=? WHERE id=?""",
-                 (status, source, confidence, now, group_id))
+    # Trạng thái hiển thị trên group đến từ bằng chứng đăng bài, không phải từ
+    # quan sát của trình duyệt.
+    group_verification.sync_group_status(conn, pipeline_id, group_id)
     return {"status": status, "source": source, "confidence": confidence, "evidence": evidence}
+
+
+def stage_album_media(conn, pipeline_id: int, picture) -> str:
+    """Chuẩn bị ảnh của Album cho worker đăng bài.
+
+    Worker đọc ảnh từ thư mục upload, nên ảnh trong Album được chép sang đó
+    và trả về đường dẫn tương đối mà worker hiểu.
+    """
+    media_path = f"uploads/{int(pipeline_id)}/{Path(picture['storage_key']).name}"
+    target = UPLOADS / str(int(pipeline_id)) / Path(picture["storage_key"]).name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if media_cloud.enabled():
+        payload = album_bytes(conn, picture)
+        if payload is None:
+            raise HTTPException(409, "Tệp ảnh không còn tồn tại trên bộ nhớ")
+        target.write_bytes(payload)
+    else:
+        source = safe_join(DATA, picture["storage_key"])
+        if not source.is_file():
+            raise HTTPException(409, "Tệp ảnh không còn tồn tại")
+        shutil.copyfile(source, target)
+    target.chmod(0o600)
+    return media_path
+
+
+def prepare_verification_post(conn, pipeline_id: int, account_id: int, group_id: int) -> dict:
+    """Nội dung bài xác minh để CTV xem trước. Hàm này không ghi gì.
+
+    Bài dùng ảnh đã qua kiểm tra trong Album, đúng tài khoản và đúng chế độ
+    đăng mà CTV đã chọn.
+    """
+    group = conn.execute("SELECT * FROM groups WHERE id=?", (group_id,)).fetchone()
+    account = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
+    if group is None or account is None:
+        raise HTTPException(404, "Not found")
+    mode, nickname = group_eligibility.mode_of(conn, account_id, group_id, group)
+    picture = conn.execute("""SELECT * FROM media_assets
+                               WHERE pipeline_id=? AND usable=1 AND locked=0
+                                 AND analysis_status='done'
+                               ORDER BY usage_count ASC, id DESC LIMIT 1""",
+                            (int(pipeline_id),)).fetchone()
+    if picture is None:
+        raise HTTPException(409, "Album chưa có ảnh đã kiểm tra để dùng cho bài xác minh")
+    return {"body": "Bài kiểm tra quyền đăng của nhóm.",
+            "media": [picture["storage_key"]],
+            "media_name": picture["description"] or "",
+            "media_id": picture["id"],
+            "picture": picture,
+            "account_id": account_id, "account_label": account["label"],
+            "group_id": group_id, "group_label": group["label"],
+            "posting_mode": mode, "nickname": nickname}
+
+
+def create_verification_post(conn, pipeline_id: int, account_id: int, group_id: int) -> dict:
+    """Tạo bài xác minh và xếp hàng gửi.
+
+    Chỉ gọi sau khi CTV đã xem trước và xác nhận.
+    """
+    draft = prepare_verification_post(conn, pipeline_id, account_id, group_id)
+    body = draft["body"]
+    mode = draft["posting_mode"]
+    nickname = draft["nickname"]
+    media_path = stage_album_media(conn, pipeline_id, draft["picture"])
+    cursor = conn.execute("""INSERT INTO posts(pipeline_id,body,media_json,created_at,anonymous_only)
+                             VALUES(?,?,?,?,1)""",
+                          (int(pipeline_id), body, json.dumps([media_path]), iso()))
+    post_id = cursor.lastrowid
+    job = conn.execute("""INSERT INTO jobs
+        (post_id,group_id,account_id,pipeline_id,state,details,scheduled_at,updated_at,
+         requested_posting_mode,requested_nickname,posting_status,verification_status,
+         is_verification)
+        VALUES(?,?,?,?,'queued','Bài xác minh quyền đăng',?,?,?,?,'pending','unverified',1)""",
+        (post_id, group_id, account_id, int(pipeline_id), iso(), iso(), mode, nickname))
+    result = {key: value for key, value in draft.items() if key != "picture"}
+    result["media"] = [media_path]
+    return {"post_id": post_id, "job_id": job.lastrowid, **result}
+
+
+def run_group_join(pipeline_id: int, account_id: int, group_id: int,
+                   answers: dict | None = None) -> dict:
+    """Chạy thao tác tham gia group bằng đúng tài khoản của group.
+
+    Hàm chỉ **chạy** thao tác và trả về kết quả quan sát được. Việc ghi lại
+    trạng thái do tầng API làm, để cùng một đường đi cho mọi nơi gọi.
+    """
+    with db() as conn:
+        group = conn.execute("SELECT * FROM groups WHERE id=?", (group_id,)).fetchone()
+        if group is None:
+            raise HTTPException(404, "Not found")
+        url = group["url"]
+    context = group_join_worker.JoinContext(db=db, iso=iso, root=ROOT, data_dir=DATA,
+                                            provider_config=load_ai_config)
+    outcome = group_join_worker.run_join_in_browser(context, account_id, url, answers or {})
+    outcome.setdefault("state", "failed")
+    outcome.setdefault("status", "error")
+    return outcome
+
+
+def group_join_worker_thread() -> None:
+    """Worker gửi yêu cầu tham gia cho các group CTV đã bật tự động tham gia."""
+    context = group_join_worker.JoinContext(db=db, iso=iso, root=ROOT, data_dir=DATA,
+                                            provider_config=load_ai_config)
+
+    def pipeline_ids() -> list[int]:
+        with db() as conn:
+            rows = conn.execute("""SELECT DISTINCT pipeline_id FROM groups
+                                   WHERE auto_join=1 AND enabled=1""").fetchall()
+        return [int(row["pipeline_id"]) for row in rows]
+
+    group_join_worker.join_worker(context, pipeline_ids, STOP_EVENT)
 
 
 def refresh_screening_for_job(conn, job_id: int) -> None:
@@ -2807,6 +2961,8 @@ def refresh_screening_for_job(conn, job_id: int) -> None:
     job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     if job is None:
         return
+    # Bằng chứng đăng bài thật là nguồn kết luận duy nhất.
+    group_verification.sync_from_job(conn, job_id)
     row = screening_row(conn, job["account_id"], job["group_id"])
     check = {}
     if row is not None:
@@ -2916,6 +3072,43 @@ def screening_worker():
         except Exception as error:
             LOG.warning("Screening worker error: %s", type(error).__name__)
             STOP_EVENT.wait(5)
+
+
+# Xác minh quyền đăng và tự động tham gia group nằm ở module riêng.
+app.include_router(verification_api.build_router(verification_api.Deps(
+    db=db,
+    require_principal=require_principal,
+    require_permission=require_permission,
+    scope_pipeline=scope_pipeline,
+    scoped_entry=scoped_entry,
+    entry=entry,
+    audit=audit,
+    enqueue_screening=enqueue_screening,
+    screening_row=screening_row,
+    group_payload=group_payload,
+    iso=iso,
+    now=lambda: datetime.now(timezone.utc),
+    create_post=lambda *args: create_verification_post(*args),
+    prepare_post=lambda *args: prepare_verification_post(*args),
+    run_join=lambda *args: run_group_join(*args),
+)))
+
+
+
+# Kiểm tra group nằm ở module riêng để ``app`` không phải chứa thêm phần xử lý.
+app.include_router(groups_api.build_router(groups_api.Deps(
+    db=db,
+    require_principal=require_principal,
+    require_permission=require_permission,
+    scope_pipeline=scope_pipeline,
+    scoped_entry=scoped_entry,
+    entry=entry,
+    audit=audit,
+    enqueue_screening=enqueue_screening,
+    screening_row=screening_row,
+    group_payload=group_payload,
+)))
+
 
 
 PRECHECK_STEPS = [
@@ -3097,114 +3290,6 @@ def precheck_allows_publish(conn, pipeline_id: int, account_id: int, media_path:
     return True, ""
 
 
-def screening_summary(conn, pipeline_id: int) -> dict:
-    counts = {status: 0 for status in (STATUS_PRIORITY, STATUS_REVIEW, STATUS_UNKNOWN,
-                                      STATUS_RESTRICTED, STATUS_FAILED)}
-    latest = ""
-    for row in conn.execute("""SELECT moderation_status, last_checked_at FROM group_screening_results
-                               WHERE pipeline_id=?""", (pipeline_id,)).fetchall():
-        counts[row["moderation_status"]] = counts.get(row["moderation_status"], 0) + 1
-        if row["last_checked_at"] and row["last_checked_at"] > latest:
-            latest = row["last_checked_at"]
-    total = sum(counts.values())
-    return {"total": total, "counts": counts, "last_checked_at": latest}
-
-
-@app.post("/api/pipelines/{pipeline_id}/groups/screen")
-def screen_groups(pipeline_id: int, data: ScreenRequest, principal: Principal = Depends(require_principal)):
-    """Queue a check for the given groups of this workspace."""
-    require_permission(principal, "groups.manage")
-    scope_pipeline(principal, pipeline_id)
-    queued, skipped = [], []
-    with db() as conn:
-        entry(conn, "pipelines", pipeline_id)
-        condition, values = owner_condition(principal, "g")
-        rows = conn.execute(f"""SELECT g.id group_id, g.account_id, g.manual_review FROM groups g
-                               WHERE g.pipeline_id=? AND {condition}""",
-                            (pipeline_id, *values)).fetchall()
-        for row in rows:
-            if data.group_ids and row["group_id"] not in data.group_ids:
-                continue
-            if row["manual_review"] and not data.force:
-                skipped.append({"group_id": row["group_id"], "reason": "Đang ở chế độ kiểm tra thủ công"})
-                continue
-            if enqueue_screening(conn, pipeline_id, row["account_id"], row["group_id"], data.force):
-                queued.append(row["group_id"])
-            else:
-                skipped.append({"group_id": row["group_id"], "reason": "Đang chờ kiểm tra hoặc còn trong thời gian chờ"})
-    audit("screening", None, f"Xếp hàng kiểm tra {len(queued)} group", pipeline_id)
-    return {"ok": True, "queued": queued, "skipped": skipped, "queued_count": len(queued)}
-
-
-@app.post("/api/pipelines/{pipeline_id}/groups/screen-bulk")
-def screen_groups_bulk(pipeline_id: int, data: ScreenRequest, principal: Principal = Depends(require_principal)):
-    """Queue a check for every group of this workspace."""
-    require_permission(principal, "groups.manage")
-    scope_pipeline(principal, pipeline_id)
-    return screen_groups(pipeline_id, ScreenRequest(force=data.force), principal)
-
-
-@app.get("/api/pipelines/{pipeline_id}/groups/screening-results")
-def screening_results(pipeline_id: int, principal: Principal = Depends(require_principal)):
-    """Every screening result of this workspace with its evidence."""
-    require_permission(principal, "groups.view")
-    scope_pipeline(principal, pipeline_id)
-    with db() as conn:
-        entry(conn, "pipelines", pipeline_id)
-        rows = conn.execute("""SELECT r.*, g.label group_label, g.url group_url, g.posting_mode,
-                g.nickname, a.label account_label
-            FROM group_screening_results r JOIN groups g ON g.id=r.group_id
-            JOIN accounts a ON a.id=r.account_id
-            WHERE r.pipeline_id=? ORDER BY r.id DESC""", (pipeline_id,)).fetchall()
-        result = [screening_payload(row) for row in rows]
-        summary = screening_summary(conn, pipeline_id)
-        queue = [dict(row) for row in conn.execute(
-            """SELECT q.*, g.label group_label FROM screening_queue q JOIN groups g ON g.id=q.group_id
-               WHERE q.pipeline_id=? AND q.state IN ('queued','running') ORDER BY q.id""",
-            (pipeline_id,)).fetchall()]
-    return {"ok": True, "summary": summary, "results": result, "queue": queue}
-
-
-@app.get("/api/pipelines/{pipeline_id}/groups/priority")
-def group_priority(pipeline_id: int, principal: Principal = Depends(require_principal)):
-    """The groups of this workspace in the order they should be served."""
-    require_permission(principal, "groups.view")
-    scope_pipeline(principal, pipeline_id)
-    with db() as conn:
-        entry(conn, "pipelines", pipeline_id)
-        rows = conn.execute("""SELECT g.*, a.label account_label FROM groups g
-            LEFT JOIN accounts a ON a.id=g.account_id WHERE g.pipeline_id=?""",
-            (pipeline_id,)).fetchall()
-        groups = []
-        for row in rows:
-            item = group_payload(conn, row)
-            result = screening_row(conn, row["account_id"], row["id"])
-            item["screening"] = screening_payload(result) if result else None
-            item["priority"] = priority_index(item["screening_status"])
-            item["publishable"] = is_publishable(item["screening_status"])
-            groups.append(item)
-        summary = screening_summary(conn, pipeline_id)
-    groups.sort(key=lambda item: (item["priority"], item["id"]))
-    return {"ok": True, "groups": groups, "summary": summary}
-
-
-@app.post("/api/pipelines/{pipeline_id}/groups/{group_id}/recheck")
-def recheck_group(pipeline_id: int, group_id: int, data: ScreenRequest,
-                  principal: Principal = Depends(require_principal)):
-    """Queue another check for one group."""
-    require_permission(principal, "groups.manage")
-    scope_pipeline(principal, pipeline_id)
-    with db() as conn:
-        group = scoped_entry(conn, "groups", group_id, principal)
-        if group["pipeline_id"] != pipeline_id:
-            raise HTTPException(404, "Not found")
-        queued = enqueue_screening(conn, pipeline_id, group["account_id"], group_id, data.force)
-    if not queued:
-        return {"ok": True, "queued": False, "message": "Group đang trong hàng đợi hoặc còn trong thời gian chờ kiểm tra lại."}
-    audit("screening", group_id, "Xếp hàng kiểm tra lại group", pipeline_id)
-    return {"ok": True, "queued": True}
-
-
 @app.post("/api/pipelines/{pipeline_id}/reels/precheck", status_code=202)
 def create_precheck(pipeline_id: int, data: PrecheckRequest, principal: Principal = Depends(require_principal)):
     """Queue the pre-check of a video that is about to be published as a Reel."""
@@ -3305,99 +3390,28 @@ def approve_precheck(pipeline_id: int, check_id: int, data: PrecheckApproval,
 
 
 # --- media album -------------------------------------------------------------
+# Cac endpoint cua Album nam trong ``api/media`` de ``app`` khong phai chua them
+# phan xu ly. Worker va cac helper duoc dung boi phan con lai o lai day.
+
+
+#: Một lần kiểm tra ảnh bị ngắt quá lâu được trả về hàng đợi.
+MEDIA_ANALYSIS_TIMEOUT_MINUTES = 15
+
+
+def media_context() -> media_service.MediaContext:
+    """The infrastructure the album business needs."""
+    return media_service.MediaContext(db=db, iso=iso, data_root=DATA,
+                                      provider_config=load_ai_config)
+
 
 def media_payload(row) -> dict:
     """The API shape of one album picture."""
-    item = dict(row)
-    try:
-        item["tags"] = json.loads(item.get("tags_json") or "[]")
-    except json.JSONDecodeError:
-        item["tags"] = []
-    try:
-        item["safety"] = json.loads(item.get("safety_json") or "{}")
-    except json.JSONDecodeError:
-        item["safety"] = {}
-    item["usable"] = bool(item.get("usable"))
-    item["locked"] = bool(item.get("locked"))
-    item["saved"] = bool(item.get("saved"))
-    return item
-
-
-def album_media(conn, pipeline_id: int, media_id: int, principal: Principal | None = None):
-    """Fetch a picture of this workspace. A picture of another workspace is not found.
-
-    A picture that belongs to another collaborator is hidden as well; the shared
-    pool of the workspace stays visible to every member.
-    """
-    row = conn.execute("SELECT * FROM media_assets WHERE id=?", (media_id,)).fetchone()
-    if row is None or row["pipeline_id"] != pipeline_id:
-        raise HTTPException(404, "Not found")
-    if principal is not None and not principal.is_admin:
-        owner = row["owner_user_id"]
-        if owner is not None and owner != principal.user_id:
-            raise HTTPException(404, "Not found")
-    return row
-
-
-def known_album_media(conn, pipeline_id: int, exclude_id: int | None = None) -> list[dict]:
-    rows = conn.execute("""SELECT id, storage_key, sha256, signature FROM media_assets
-                           WHERE pipeline_id=?""", (pipeline_id,)).fetchall()
-    return [dict(row) for row in rows if exclude_id is None or row["id"] != exclude_id]
+    return media_service.media_payload(row)
 
 
 def analyze_media_job(media_id: int) -> None:
     """Analyse one picture in the background."""
-    with db() as conn:
-        row = conn.execute("SELECT * FROM media_assets WHERE id=?", (media_id,)).fetchone()
-        if row is None:
-            return
-        record = dict(row)
-        known = known_album_media(conn, record["pipeline_id"], record["id"])
-    scratch = None
-    try:
-        if media_cloud.enabled():
-            with db() as conn:
-                payload = album_bytes(conn, record)
-            if payload is None:
-                raise StorageError("Ảnh không còn tồn tại trên R2")
-            scratch = Path(DATA) / "album" / f"analysis-{int(record['id'])}.tmp"
-            scratch.parent.mkdir(parents=True, exist_ok=True)
-            scratch.write_bytes(payload)
-            path = scratch
-        else:
-            path = safe_join(DATA, record["storage_key"])
-        outcome = analyze_image(path, load_ai_config(), known)
-    except Exception as error:
-        with db() as conn:
-            conn.execute("""UPDATE media_assets SET analysis_status='error', safety_status='unknown',
-                            updated_at=? WHERE id=?""", (iso(), media_id))
-        return
-    finally:
-        if scratch is not None:
-            try:
-                scratch.unlink(missing_ok=True)
-            except OSError:
-                pass
-    tags = outcome.get("tags") or []
-    with db() as conn:
-        conn.execute("""UPDATE media_assets SET description=?, tags_json=?, safety_status=?,
-                        safety_json=?, analysis_status='done', usable=?, updated_at=? WHERE id=?""",
-                     (outcome.get("description", ""), json.dumps(tags, ensure_ascii=False),
-                      outcome.get("status", "unknown"),
-                      json.dumps({k: v for k, v in outcome.items() if k != "tags"}, ensure_ascii=False),
-                      1 if outcome.get("status") == "pass" else 0, iso(), media_id))
-        conn.execute("DELETE FROM media_tags WHERE media_id=?", (media_id,))
-        for tag in tags:
-            conn.execute("INSERT OR IGNORE INTO media_tags(media_id,tag,created_at) VALUES(?,?,?)",
-                         (media_id, str(tag)[:40], iso()))
-        conn.execute("""INSERT INTO media_analysis_results
-            (media_id,pipeline_id,status,description,tags_json,risk,findings_json,model_version,checked_at,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                     (media_id, record["pipeline_id"], outcome.get("status", "unknown"),
-                      outcome.get("description", ""), json.dumps(tags, ensure_ascii=False),
-                      outcome.get("risk", "none"),
-                      json.dumps([outcome.get("note", ""), outcome.get("category", "")], ensure_ascii=False),
-                      outcome.get("model_version", ""), iso(), iso()))
+    media_service.run_analysis(media_context(), media_id)
 
 
 def media_worker():
@@ -3405,8 +3419,15 @@ def media_worker():
     while not STOP_EVENT.is_set():
         try:
             with db() as conn:
-                row = conn.execute("""SELECT id FROM media_assets WHERE analysis_status='pending'
-                                      ORDER BY id LIMIT 1""").fetchone()
+                # Một lần kiểm tra bị ngắt giữa chừng được trả về hàng đợi.
+                stale = (datetime.now(timezone.utc)
+                         - timedelta(minutes=MEDIA_ANALYSIS_TIMEOUT_MINUTES)).isoformat()
+                conn.execute("""UPDATE media_assets SET analysis_status=?
+                                WHERE analysis_status=? AND updated_at < ?""",
+                             (media_status.ANALYSIS_QUEUED, media_status.ANALYSIS_RUNNING, stale))
+                row = conn.execute("""SELECT id FROM media_assets WHERE analysis_status=?
+                                      ORDER BY id LIMIT 1""",
+                                   (media_status.ANALYSIS_QUEUED,)).fetchone()
             if row is None:
                 STOP_EVENT.wait(5)
                 continue
@@ -3414,237 +3435,6 @@ def media_worker():
         except Exception as error:
             LOG.warning("Media analysis worker error: %s", type(error).__name__)
             STOP_EVENT.wait(5)
-
-
-@app.post("/api/pipelines/{pipeline_id}/media/upload", status_code=201)
-async def upload_album_media(pipeline_id: int, files: list[UploadFile] = File(...),
-                             principal: Principal = Depends(require_principal)):
-    """Upload one or many pictures into the album of this workspace."""
-    require_permission(principal, "media.upload")
-    scope_pipeline(principal, pipeline_id)
-    if not files:
-        raise HTTPException(422, "Chưa có ảnh nào")
-    if len(files) > 20:
-        raise HTTPException(422, "Tối đa 20 ảnh mỗi lần")
-    stored = []
-    for upload in files:
-        data = await upload.read()
-        try:
-            item = store_image(DATA, pipeline_id, upload.filename or "", upload.content_type or "", data)
-        except StorageError as error:
-            raise HTTPException(422, str(error)) from error
-        with db() as conn:
-            entry(conn, "pipelines", pipeline_id)
-            owner = resource_owner(principal)
-            scope = media_cloud.SHARED_SCOPE if not owner else ""
-            if owner:
-                user = conn.execute("SELECT username FROM users WHERE id=?", (owner,)).fetchone()
-                scope = user["username"] if user else media_cloud.SHARED_SCOPE
-            pipeline_name = conn.execute("SELECT name FROM pipelines WHERE id=?",
-                                         (pipeline_id,)).fetchone()["name"]
-            if media_cloud.enabled():
-                media_cloud.ensure_bucket()
-                media_cloud.ensure_folder(media_cloud.folder(pipeline_name))
-                media_cloud.put_bytes(media_cloud.remote_key(pipeline_name, scope, item.storage_key),
-                                      data, item.mime_type)
-                if item.thumbnail_key:
-                    try:
-                        thumb = safe_join(DATA, item.thumbnail_key).read_bytes()
-                    except (StorageError, OSError):
-                        thumb = b""
-                    if thumb:
-                        media_cloud.put_bytes(
-                            media_cloud.remote_key(pipeline_name, scope, item.thumbnail_key),
-                            thumb, "image/jpeg")
-                # The cloud holds the album; the local copy was only a scratch
-                # space for the thumbnail.
-                for scratch in (item.storage_key, item.thumbnail_key):
-                    if not scratch:
-                        continue
-                    try:
-                        safe_join(DATA, scratch).unlink(missing_ok=True)
-                    except (StorageError, OSError):
-                        continue
-            cursor = conn.execute("""INSERT INTO media_assets
-                (pipeline_id,uploader_id,storage_key,thumbnail_key,original_name,mime_type,width,height,
-                 size_bytes,sha256,signature,analysis_status,created_at,updated_at,owner_user_id)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)""",
-                (pipeline_id, principal.user_id, item.storage_key, item.thumbnail_key,
-                 item.original_name, item.mime_type, item.width, item.height, item.size_bytes,
-                 item.sha256, "", iso(), iso(), owner))
-            media_id = cursor.lastrowid
-        audit("media", media_id, f"Tải ảnh lên Album: {item.original_name}", pipeline_id)
-        stored.append({"id": media_id, "name": item.original_name,
-                       "size": item.size_bytes, "width": item.width, "height": item.height})
-    return {"ok": True, "media": stored, "count": len(stored)}
-
-
-@app.get("/api/pipelines/{pipeline_id}/media")
-def list_album_media(pipeline_id: int, tag: str = "", search: str = "", only_usable: bool = False,
-                     principal: Principal = Depends(require_principal)):
-    """The album of this workspace with its tags and counters."""
-    require_permission(principal, "media.view")
-    scope_pipeline(principal, pipeline_id)
-    with db() as conn:
-        entry(conn, "pipelines", pipeline_id)
-        condition, values = owner_condition(principal, "m")
-        rows = conn.execute(f"""SELECT m.* FROM media_assets m WHERE m.pipeline_id=?
-                               AND {condition} ORDER BY m.id DESC""",
-                            (pipeline_id, *values)).fetchall()
-        result = [media_payload(row) for row in rows]
-        if tag:
-            result = [item for item in result if tag.casefold() in [t.casefold() for t in item["tags"]]]
-        if search:
-            needle = search.casefold()
-            result = [item for item in result
-                      if needle in (item.get("description") or "").casefold()
-                      or needle in (item.get("original_name") or "").casefold()
-                      or any(needle in t.casefold() for t in item["tags"])]
-        if only_usable:
-            result = [item for item in result if item["usable"] and not item["locked"]]
-        usage = {}
-        for entry_row in conn.execute("""SELECT media_id, COUNT(*) total FROM media_usage_history
-                                        WHERE pipeline_id=? GROUP BY media_id""", (pipeline_id,)).fetchall():
-            usage[entry_row["media_id"]] = entry_row["total"]
-    for item in result:
-        item["usage_history_count"] = usage.get(item["id"], 0)
-    counts = {"total": len(result), "usable": 0, "needs_review": 0, "locked": 0, "saved": 0}
-    for item in result:
-        if item["usable"]:
-            counts["usable"] += 1
-        if item["safety_status"] in ("needs_review", "unknown"):
-            counts["needs_review"] += 1
-        if item["locked"]:
-            counts["locked"] += 1
-        if item["saved"]:
-            counts["saved"] += 1
-    return {"ok": True, "media": result, "counts": counts}
-
-
-@app.get("/api/pipelines/{pipeline_id}/media/{media_id}")
-def get_album_media(pipeline_id: int, media_id: int, principal: Principal = Depends(require_principal)):
-    """One picture with its analysis and its usage history."""
-    require_permission(principal, "media.view")
-    scope_pipeline(principal, pipeline_id)
-    with db() as conn:
-        row = album_media(conn, pipeline_id, media_id, principal)
-        history = [dict(item) for item in conn.execute(
-            """SELECT h.*, g.label group_label FROM media_usage_history h
-               LEFT JOIN groups g ON g.id=h.group_id WHERE h.media_id=? ORDER BY h.id DESC LIMIT 50""",
-            (media_id,)).fetchall()]
-    return {"ok": True, "media": media_payload(row), "usage_history": history}
-
-
-@app.get("/api/pipelines/{pipeline_id}/media/{media_id}/file")
-def get_album_media_file(pipeline_id: int, media_id: int, principal: Principal = Depends(require_principal)):
-    """Serve the picture. Only a member of this workspace may read it."""
-    require_permission(principal, "media.view")
-    scope_pipeline(principal, pipeline_id)
-    with db() as conn:
-        row = album_media(conn, pipeline_id, media_id, principal)
-        payload = album_bytes(conn, row)
-    if payload is None:
-        raise HTTPException(404, "Not found")
-    return Response(content=payload, media_type=row["mime_type"] or "image/jpeg")
-
-
-@app.get("/api/pipelines/{pipeline_id}/media/{media_id}/thumbnail")
-def get_album_media_thumbnail(pipeline_id: int, media_id: int, principal: Principal = Depends(require_principal)):
-    """Serve the small preview of a picture."""
-    require_permission(principal, "media.view")
-    scope_pipeline(principal, pipeline_id)
-    with db() as conn:
-        row = album_media(conn, pipeline_id, media_id, principal)
-        key = row["thumbnail_key"] or row["storage_key"]
-        payload = album_bytes(conn, row, key)
-    if payload is None:
-        raise HTTPException(404, "Not found")
-    return Response(content=payload, media_type="image/jpeg")
-
-
-@app.patch("/api/pipelines/{pipeline_id}/media/{media_id}")
-def update_album_media(pipeline_id: int, media_id: int, data: MediaUpdate,
-                       principal: Principal = Depends(require_principal)):
-    """Change the tags, the state or the description of a picture."""
-    require_permission(principal, "media.edit")
-    scope_pipeline(principal, pipeline_id)
-    with db() as conn:
-        row = album_media(conn, pipeline_id, media_id, principal)
-        if not principal.is_admin and row["owner_user_id"] is None:
-            raise HTTPException(403, "Ảnh dùng chung chỉ Chủ hệ thống mới sửa được")
-        if data.usable is not None and not principal.can("media.approve"):
-            raise HTTPException(403, "Chỉ Chủ hệ thống được đánh dấu ảnh là có thể sử dụng")
-        if data.locked is not None and not principal.can("media.approve"):
-            raise HTTPException(403, "Chỉ Chủ hệ thống được tạm khóa ảnh")
-        if data.tags is not None:
-            conn.execute("UPDATE media_assets SET tags_json=?, updated_at=? WHERE id=?",
-                         (json.dumps([str(tag)[:40] for tag in data.tags][:20]), iso(), media_id))
-            conn.execute("DELETE FROM media_tags WHERE media_id=?", (media_id,))
-            for tag in data.tags[:20]:
-                conn.execute("INSERT OR IGNORE INTO media_tags(media_id,tag,created_at) VALUES(?,?,?)",
-                             (media_id, str(tag)[:40], iso()))
-        if data.description is not None:
-            conn.execute("UPDATE media_assets SET description=?, updated_at=? WHERE id=?",
-                         (data.description[:600], iso(), media_id))
-        if data.usable is not None:
-            conn.execute("UPDATE media_assets SET usable=?, updated_at=? WHERE id=?",
-                         (int(data.usable), iso(), media_id))
-        if data.locked is not None:
-            conn.execute("UPDATE media_assets SET locked=?, updated_at=? WHERE id=?",
-                         (int(data.locked), iso(), media_id))
-        if data.saved is not None:
-            conn.execute("UPDATE media_assets SET saved=?, updated_at=? WHERE id=?",
-                         (int(data.saved), iso(), media_id))
-        updated = conn.execute("SELECT * FROM media_assets WHERE id=?", (media_id,)).fetchone()
-    audit("media", media_id, "Cập nhật ảnh trong Album", pipeline_id)
-    return {"ok": True, "media": media_payload(updated)}
-
-
-@app.delete("/api/pipelines/{pipeline_id}/media/{media_id}")
-def delete_album_media(pipeline_id: int, media_id: int, principal: Principal = Depends(require_principal)):
-    """Remove a picture. A picture that a pending job still uses is kept."""
-    require_permission(principal, "media.delete")
-    scope_pipeline(principal, pipeline_id)
-    with db() as conn:
-        row = album_media(conn, pipeline_id, media_id, principal)
-        if not principal.is_admin and row["owner_user_id"] is None:
-            raise HTTPException(403, "Ảnh dùng chung chỉ Chủ hệ thống mới xóa được")
-        used = conn.execute("""SELECT COUNT(*) FROM auto_post_jobs WHERE media_id=? AND status IN
-                               ('pending','approved','queued')""", (media_id,)).fetchone()[0]
-        if used:
-            raise HTTPException(409, "Ảnh đang được một job chưa hoàn tất sử dụng, chưa thể xóa")
-        conn.execute("DELETE FROM media_assets WHERE id=?", (media_id,))
-    if media_cloud.enabled():
-        with db() as conn:
-            for key in (row["storage_key"], row["thumbnail_key"]):
-                if key:
-                    media_cloud.delete_key(album_remote_key(conn, row, key))
-    try:
-        delete_media(DATA, row["storage_key"], row["thumbnail_key"])
-    except StorageError:
-        pass
-    audit("media", media_id, "Xóa ảnh khỏi Album", pipeline_id)
-    return {"ok": True}
-
-
-@app.post("/api/pipelines/{pipeline_id}/media/analyze")
-def analyze_album_media(pipeline_id: int, data: MediaAnalyzeRequest,
-                        principal: Principal = Depends(require_principal)):
-    """Queue the analysis of the pictures that are still waiting for it."""
-    require_permission(principal, "media.upload")
-    scope_pipeline(principal, pipeline_id)
-    queued = []
-    with db() as conn:
-        entry(conn, "pipelines", pipeline_id)
-        rows = conn.execute("""SELECT id FROM media_assets WHERE pipeline_id=?
-                               AND analysis_status IN ('pending','error')""", (pipeline_id,)).fetchall()
-        for row in rows:
-            conn.execute("UPDATE media_assets SET analysis_status='pending', updated_at=? WHERE id=?",
-                         (iso(), row["id"]))
-            queued.append(row["id"])
-    audit("media", None, f"Xếp hàng phân tích {len(queued)} ảnh", pipeline_id)
-    return {"ok": True, "queued": queued, "count": len(queued)}
-
 
 
 # --- automatic group posting -------------------------------------------------
@@ -4079,8 +3869,12 @@ def schedule_auto_post(pipeline_id: int, principal: Principal = Depends(require_
             raise HTTPException(409, "Tự động đăng group đang tắt")
         outcome = post_scheduler.distribute(conn, pipeline_id, provider_config=load_ai_config())
     if not outcome["created"] and outcome.get("no_media"):
-        reason = (outcome.get("skipped") or ["Album chưa có ảnh phù hợp"])[0]
-        raise HTTPException(409, str(reason)[:300])
+        # Nói rõ vì sao không có bài nào, thay vì chỉ trả về con số không.
+        reasons = [str(note) for note in (outcome.get("notes") or [])]
+        reasons += [f"{item.get('label')}: {item.get('reason')}"
+                    for item in (outcome.get("blockers") or [])]
+        detail = "; ".join(dict.fromkeys(reasons))[:300]
+        raise HTTPException(409, detail or "Album chưa có ảnh đủ điều kiện để đăng tự động")
     audit("auto_post", None, f"Chuẩn bị {len(outcome['created'])} bài tự động", pipeline_id)
     return {"ok": True, **outcome}
 
@@ -4139,8 +3933,10 @@ def publish_auto_post_jobs() -> None:
                 group = conn.execute("SELECT * FROM groups WHERE id=?", (job["group_id"],)).fetchone()
                 if group is None:
                     raise ValueError("Group không còn tồn tại")
-                if group["screening_status"] not in ("priority", "review"):
-                    raise ValueError("Group chưa được xác minh để đăng tự động")
+                decision = group_eligibility.pair_decision(conn, job["pipeline_id"],
+                                                            job["account_id"], job["group_id"], group)
+                if not decision["eligible"]:
+                    raise ValueError(decision["reason"] or "Group chưa được xác minh để đăng tự động")
                 if group["status"] != "active" or not group["enabled"]:
                     raise ValueError("Group đang tạm dừng")
                 if not group["approved_target"]:
@@ -4905,9 +4701,9 @@ def run_group_probe(account_id: int, url: str, nickname: str) -> dict:
                                         "nickname": nickname}), encoding="utf-8")
     payload_file.chmod(0o600)
     outcome = {"status": "error", "details": "Không chạy được trình duyệt kiểm tra",
-               "logged_in": False, "accessible": False, "is_member": False, "can_post": False,
-               "supports_anonymous": False, "supports_nickname": False,
-               "nickname_available": False, "requires_approval": False, "group_name": ""}
+               "logged_in": False, "accessible": None, "is_member": None, "can_post": None,
+               "supports_anonymous": None, "supports_nickname": None,
+               "nickname_available": None, "requires_approval": False, "group_name": ""}
     try:
         proc = subprocess.run(
             [sys.executable, str(ROOT / "fb_browser.py"), "check-group", str(payload_file), str(result_file)],
@@ -5501,15 +5297,26 @@ def claim_next_job():
             WHERE j.state='queued' AND j.scheduled_at<=?
               AND p.pipeline_id=g.pipeline_id AND p.pipeline_id=a.pipeline_id
               AND (j.pipeline_id IS NULL OR j.pipeline_id=p.pipeline_id)
-              AND g.screening_status IN ('priority','review')
+              AND (j.is_verification=1
+                   OR g.screening_status IN ('verified_posted','pending_group_approval'))
               AND g.manual_review=0
-            ORDER BY (CASE g.screening_status WHEN 'priority' THEN 0 WHEN 'review' THEN 1 ELSE 2 END),
+            ORDER BY (CASE g.screening_status WHEN 'verified_posted' THEN 0 ELSE 1 END),
                      j.scheduled_at, j.id LIMIT 1""", (iso(),)).fetchone()
         if not row:
             return None
         job = dict(row)
         if not job["anonymous_only"] or not json.loads(job["media_json"]):
             conn.execute("UPDATE jobs SET state='needs_review',details='Anonymous photo-only policy not met; not posted',updated_at=? WHERE id=?", (iso(), job["id"]))
+            return None
+        # Quyết định theo đúng cặp Facebook–Group, không dựa trên cột chung
+        # của group.
+        decision = group_eligibility.pair_decision(conn, job["pipeline_id"],
+                                                    job["account_id"], job["group_id"])
+        if not decision["eligible"] and not job.get("is_verification"):
+            conn.execute("""UPDATE jobs SET state='needs_review',details=?,updated_at=?
+                            WHERE id=?""",
+                         (f"Chưa xác minh được quyền đăng: {decision['reason']}"[:500],
+                          iso(), job["id"]))
             return None
         if not job["pipeline_enabled"] or not job["account_enabled"] or not job["group_enabled"] \
                 or not job["approved_target"] or job.get("group_status") != "active":

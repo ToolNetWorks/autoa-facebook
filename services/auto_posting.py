@@ -12,7 +12,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from services import ai_provider
+from services import ai_provider, group_verification
 from services.caption_validator import analyze_caption
 from services.image_selection import select_media
 
@@ -32,12 +32,14 @@ Trả về đúng một đối tượng JSON: {"caption": "...", "hashtags": [".
 def eligible_groups(groups: list[dict], account_id: int | None = None) -> list[dict]:
     """The groups of a workspace that may be served automatically.
 
-    Only a group that was verified as publishing directly or as needing an
-    approval qualifies, and it has to be active with a confirmed permission.
+    A group qualifies only when it has real post evidence for the pair that
+    will publish it: either the post went out, or it is waiting for the group
+    admin to approve it. The group also has to be active with a confirmed
+    permission.
     """
     result = []
     for group in groups:
-        if group.get("screening_status") not in ("priority", "review"):
+        if group.get("screening_status") not in group_verification.SERVABLE_STATUSES:
             continue
         if group.get("status") != "active" or not group.get("enabled"):
             continue
@@ -46,7 +48,8 @@ def eligible_groups(groups: list[dict], account_id: int | None = None) -> list[d
         if account_id is not None and group.get("account_id") != account_id:
             continue
         result.append(group)
-    result.sort(key=lambda item: (0 if item.get("screening_status") == "priority" else 1, item.get("id", 0)))
+    result.sort(key=lambda item: (0 if item.get("screening_status") == group_verification.VERIFIED_POSTED
+                                  else 1, item.get("id", 0)))
     return result
 
 

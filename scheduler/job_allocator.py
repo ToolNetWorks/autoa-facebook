@@ -23,7 +23,8 @@ from datetime import datetime, timedelta, timezone
 
 from scheduler import account_limits, group_cooldowns, time_windows
 from services import ai_provider, duplicate_guard
-from services.auto_posting import create_caption, eligible_groups
+from services import group_eligibility
+from services.auto_posting import create_caption
 from services.caption_validator import analyze_caption
 from services.image_selection import select_media
 
@@ -142,16 +143,6 @@ def _group_rows(conn, pipeline_id: int, settings: dict) -> list[dict]:
     return groups
 
 
-def _groups_of_account(conn, account_id: int, groups: list[dict]) -> list[dict]:
-    """Các group mà tài khoản này được phép đăng."""
-    assignments = conn.execute("""SELECT group_id FROM group_accounts
-                                   WHERE account_id=? AND status='active'""",
-                               (int(account_id),)).fetchall()
-    allowed = {row["group_id"] for row in assignments}
-    return [group for group in groups
-            if group.get("account_id") == account_id or group.get("id") in allowed]
-
-
 def _media_rows(conn, pipeline_id: int) -> list[dict]:
     """Ảnh của Album kèm dấu vết chống trùng."""
     rows = conn.execute("""SELECT id, description, tags_json, safety_status, analysis_status,
@@ -197,7 +188,7 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
 
     accounts = _account_rows(conn, pipeline_id, settings)
     groups = _group_rows(conn, pipeline_id, settings)
-    eligible = eligible_groups(groups)
+    eligible = group_eligibility.eligible_pairs(conn, pipeline_id, groups)
     media = _media_rows(conn, pipeline_id)
     overrides = account_overrides(conn, pipeline_id)
 
@@ -235,7 +226,7 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
         account = next((item for item in accounts if item["id"] == account_id), None)
         if account is None:
             continue
-        own_groups = _groups_of_account(conn, account_id, eligible)
+        own_groups = group_eligibility.groups_for_account(eligible, account_id)
         if not own_groups:
             notes.append(f"{account['label']}: chưa có group đủ điều kiện")
             continue

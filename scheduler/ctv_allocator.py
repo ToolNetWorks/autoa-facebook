@@ -20,7 +20,8 @@ from datetime import datetime, timezone
 
 from scheduler import account_limits, group_cooldowns, time_windows
 from services import ai_provider, ctv_auto_post, duplicate_guard
-from services.auto_posting import create_caption, eligible_groups
+from services import group_eligibility
+from services.auto_posting import create_caption
 from services.image_selection import select_media
 
 LOG = logging.getLogger("facebook-pipeline.ctv-allocator")
@@ -84,16 +85,6 @@ def _group_rows(conn, pipeline_id: int, settings: dict) -> list[dict]:
             continue
         result.append(item)
     return result
-
-
-def _groups_of_account(conn, account_id: int, groups: list[dict]) -> list[dict]:
-    """Các group mà tài khoản này được phép đăng."""
-    rows = conn.execute("""SELECT group_id FROM group_accounts
-                            WHERE account_id=? AND status='active'""",
-                         (int(account_id),)).fetchall()
-    allowed = {row["group_id"] for row in rows}
-    return [group for group in groups
-            if group.get("account_id") == account_id or group.get("id") in allowed]
 
 
 def _media_rows(conn, pipeline_id: int) -> list[dict]:
@@ -199,7 +190,7 @@ def plan_for_owner(conn, pipeline_id: int, settings: dict, moment: datetime | No
 
     accounts = _account_rows(conn, pipeline_id, settings)
     groups = _group_rows(conn, pipeline_id, settings)
-    eligible = eligible_groups(groups)
+    eligible = group_eligibility.eligible_pairs(conn, pipeline_id, groups)
     media = _media_rows(conn, pipeline_id)
     provider_config = provider_config or ai_provider.load_config()
     rules = settings.get("schedule_rules") or {}
@@ -250,7 +241,7 @@ def plan_for_owner(conn, pipeline_id: int, settings: dict, moment: datetime | No
         account = next((item for item in accounts if item["id"] == account_id), None)
         if account is None:
             continue
-        own_groups = _groups_of_account(conn, account_id, eligible)
+        own_groups = group_eligibility.groups_for_account(eligible, account_id)
         if not own_groups:
             notes.append(f"{account['label']}: chưa có group đủ điều kiện")
             continue

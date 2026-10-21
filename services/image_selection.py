@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+
+from services import media_status
 
 STOP_WORDS = {
     "với", "của", "cho", "các", "những", "một", "được", "này", "đó", "là", "và",
@@ -40,19 +42,21 @@ def score_candidate(media: dict, topic: str, now: datetime | None = None) -> tup
         return -1.0, ["Ảnh chưa được đánh dấu là có thể sử dụng"]
     if media.get("locked"):
         return -1.0, ["Ảnh đang bị tạm khóa"]
-    safety = media.get("safety_status") or "unknown"
-    if safety == "blocked":
-        return -1.0, ["Ảnh bị chặn vì nội dung rủi ro"]
-    if safety == "needs_review":
-        return -1.0, ["Ảnh còn cảnh báo an toàn chưa được xử lý"]
-    if safety not in ("pass", "unknown"):
-        return -1.0, ["Trạng thái an toàn của ảnh chưa rõ"]
 
-    if safety == "pass":
+    state = media_status.state_of(media.get("analysis_status"), media.get("safety_status"))
+    if state == media_status.BLOCKED:
+        return -1.0, ["Ảnh bị chặn vì nội dung rủi ro"]
+    if state == media_status.CHECK_FAILED:
+        return -1.0, ["Ảnh chưa kiểm tra được nên không dùng để đăng"]
+    if state in (media_status.UPLOADED, media_status.ANALYZING):
+        return -1.0, ["Ảnh đang được kiểm tra"]
+    if state == media_status.NEEDS_REVIEW:
+        # CTV của Workspace đã xem xét và cho phép dùng, nên ảnh được dùng.
+        score += 0.5
+        reasons.append("đã xem xét và cho phép dùng")
+    else:
         score += 3.0
         reasons.append("đã qua kiểm tra an toàn")
-    else:
-        reasons.append("chưa có kết quả kiểm tra an toàn")
 
     topic_words = _words(topic)
     if topic_words:
@@ -86,10 +90,6 @@ def score_candidate(media: dict, topic: str, now: datetime | None = None) -> tup
     if media.get("saved"):
         score += 0.5
         reasons.append("được lưu để dùng cho lịch sau")
-
-    if media.get("analysis_status") != "done":
-        score -= 1.0
-        reasons.append("phân tích ảnh chưa xong")
 
     return score, reasons
 

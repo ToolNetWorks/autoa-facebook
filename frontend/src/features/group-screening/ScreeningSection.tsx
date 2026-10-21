@@ -1,61 +1,157 @@
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/services/apiClient';
 import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
-import { Alert, Badge, Card, DataTable, EmptyState, Tabs } from '@/components/ui/Surfaces';
+import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Skeleton, Tabs } from '@/components/ui/Surfaces';
+import { usePermissions } from '@/hooks/usePermissions';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
+type Tone = 'ok' | 'warn' | 'bad' | 'neutral' | 'info';
+
+/** Sáu trạng thái xác minh, đúng như backend phân loại. */
 const LABELS: Record<string, string> = {
-  priority: 'Đã xác minh đăng trực tiếp',
-  review: 'Cần Admin group duyệt',
-  unknown: 'Chưa xác định',
-  restricted: 'Nhóm hạn chế',
-  failed: 'Không kiểm tra được',
+  not_tested: 'Chưa xác minh',
+  test_in_progress: 'Đang xác minh',
+  submitted_unverified: 'Đã gửi, chưa xác nhận được',
+  pending_group_approval: 'Đang chờ Admin group duyệt',
+  verified_posted: 'Đã xác minh đăng thành công',
+  rejected: 'Bài bị từ chối',
+  restricted_confirmed: 'Facebook hạn chế quyền đăng',
+  check_failed: 'Không xác minh được',
 };
 
-const TONE: Record<string, 'ok' | 'warn' | 'bad' | 'neutral'> = {
-  priority: 'ok',
-  review: 'warn',
-  restricted: 'bad',
-  failed: 'bad',
-  unknown: 'neutral',
+const TONE: Record<string, Tone> = {
+  not_tested: 'neutral',
+  test_in_progress: 'info',
+  submitted_unverified: 'warn',
+  pending_group_approval: 'warn',
+  verified_posted: 'ok',
+  rejected: 'bad',
+  restricted_confirmed: 'bad',
+  check_failed: 'bad',
 };
 
 const FILTERS = [
   { id: 'all', label: 'Tất cả' },
-  { id: 'priority', label: 'Ưu tiên' },
-  { id: 'review', label: 'Chờ duyệt' },
-  { id: 'unknown', label: 'Chưa xác định' },
-  { id: 'restricted', label: 'Hạn chế' },
+  { id: 'verified', label: 'Đã xác minh' },
+  { id: 'review', label: 'Chờ group duyệt' },
+  { id: 'pending', label: 'Chưa xác minh' },
+  { id: 'failed', label: 'Xác minh lỗi' },
+  { id: 'restricted', label: 'Bị hạn chế' },
 ];
 
+interface Verification {
+  group_id: number;
+  account_id: number;
+  group_label: string;
+  account_label: string;
+  posting_mode: string;
+  verification_status: string;
+  status_label: string;
+  status_tone: Tone;
+  reason: string;
+  has_evidence: boolean;
+  verified_post_url: string;
+  verified_posting_mode: string;
+  submitted_at: string | null;
+  verified_at: string | null;
+  last_error_code: string;
+}
+
+const POLL_INTERVAL_MS = 5000;
+
 export function ScreeningSection({ workspace }: { workspace: WorkspaceData }) {
+  const { can } = usePermissions();
   const { push } = useToast();
+  const [rows, setRows] = useState<Verification[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('all');
   const [busy, setBusy] = useState<number | null>(null);
 
-  useEffect(() => {
-    workspace.reloadGroups();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const load = useCallback(async (quiet = false) => {
+    if (!workspace.pipelineId) {
+      setLoading(false);
+      return;
+    }
+    if (!quiet) setLoading(true);
+    try {
+      const response = await api.get<{ verifications: Verification[] }>(
+        `/api/pipelines/${workspace.pipelineId}/groups/verifications`,
+      );
+      setRows(response.verifications);
+      setError(null);
+    } catch (failure) {
+      if (!quiet) {
+        setError(failure instanceof Error ? failure.message : 'Không tải được kết quả xác minh');
+      }
+    } finally {
+      if (!quiet) setLoading(false);
+    }
+  }, [workspace.pipelineId]);
 
-  const groups = workspace.groups;
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const running = rows.some(
+    (item) => item.verification_status === 'test_in_progress'
+      || item.verification_status === 'submitted_unverified',
+  );
+
+  // Trong lúc một lần xác minh đang chạy, trang tự cập nhật.
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setTimeout(() => {
+      void load(true);
+    }, POLL_INTERVAL_MS);
+    return () => window.clearTimeout(timer);
+  }, [running, rows, load]);
+
   const counts = useMemo(() => {
     const result: Record<string, number> = {};
-    groups.forEach((group) => {
-      result[group.screening_status] = (result[group.screening_status] ?? 0) + 1;
+    rows.forEach((item) => {
+      result[item.verification_status] = (result[item.verification_status] ?? 0) + 1;
     });
     return result;
-  }, [groups]);
+  }, [rows]);
 
-  const visible = groups.filter((group) => filter === 'all' || group.screening_status === filter);
+  const visible = useMemo(() => {
+    if (filter === 'all') return rows;
+    if (filter === 'verified') return rows.filter((item) => item.verification_status === 'verified_posted');
+    if (filter === 'review') {
+      return rows.filter((item) => item.verification_status === 'pending_group_approval');
+    }
+    if (filter === 'pending') return rows.filter((item) => item.verification_status === 'not_tested');
+    if (filter === 'failed') {
+      return rows.filter(
+        (item) => item.verification_status === 'check_failed'
+          || item.verification_status === 'submitted_unverified',
+      );
+    }
+    return rows.filter((item) => item.verification_status === 'restricted_confirmed');
+  }, [rows, filter]);
 
-  async function recheck(groupId: number) {
-    setBusy(groupId);
+  async function verify(item: Verification) {
+    setBusy(item.group_id);
     try {
-      await api.post(`/api/pipelines/${workspace.pipelineId}/groups/${groupId}/recheck`, { force: true });
+      await api.post(`/api/pipelines/${workspace.pipelineId}/groups/${item.group_id}/verification/confirm`);
+      push('Đã gửi bài xác minh. Hệ thống sẽ báo lại kết quả thật.', 'info');
+      await load(true);
+    } catch (failure) {
+      push(failure instanceof Error ? failure.message : 'Không gửi được bài xác minh', 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function recheck(item: Verification) {
+    setBusy(item.group_id);
+    try {
+      await api.post(`/api/pipelines/${workspace.pipelineId}/groups/${item.group_id}/recheck`, { force: true });
       push('Đã xếp hàng kiểm tra lại group', 'success');
+      await load(true);
     } catch (failure) {
       push(failure instanceof Error ? failure.message : 'Không kiểm tra được', 'error');
     } finally {
@@ -67,83 +163,134 @@ export function ScreeningSection({ workspace }: { workspace: WorkspaceData }) {
     <div className="stack">
       <div className="section-title">
         <div>
-          <h2>Group Screening Center</h2>
+          <h2>Group Screening</h2>
           <p className="hint">
-            Hệ thống tự phân loại group theo bằng chứng quan sát được. Group chưa xác định sẽ chờ kiểm tra, không tự đăng.
+            Một group chỉ được coi là xác minh khi đã có bài đăng thật trong group bằng đúng tài khoản.
           </p>
         </div>
       </div>
 
-      <div className="stat-row">
-        <Stat label="Tổng group" value={groups.length} />
-        <Stat label="Ưu tiên" value={counts.priority ?? 0} />
-        <Stat label="Chờ duyệt" value={counts.review ?? 0} />
-        <Stat label="Chưa xác định" value={counts.unknown ?? 0} />
-        <Stat label="Hạn chế" value={(counts.restricted ?? 0) + (counts.failed ?? 0)} />
-      </div>
+      {error ? (
+        <ErrorState
+          title="Không thể tải kết quả xác minh. Vui lòng thử lại."
+          action={
+            <Button size="sm" onClick={() => void load()}>
+              Thử lại
+            </Button>
+          }
+        />
+      ) : null}
 
-      <Tabs
-        tabs={FILTERS.map((entry) => ({
-          id: entry.id,
-          label: entry.label,
-          count:
-            entry.id === 'all'
-              ? groups.length
-              : entry.id === 'restricted'
-                ? (counts.restricted ?? 0) + (counts.failed ?? 0)
-                : counts[entry.id] ?? 0,
-        }))}
-        active={filter}
-        onChange={setFilter}
-      />
+      {loading && rows.length === 0 ? (
+        <Skeleton variant="block" />
+      ) : null}
 
-      {groups.length === 0 ? (
-        <EmptyState title="Chưa có group nào" description="Thêm group ở mục Nhóm Facebook trước." />
-      ) : (
-        <Card>
-          <DataTable head={['Group', 'Chế độ', 'Phân loại', 'Bằng chứng', 'Thao tác']}>
-            {visible.map((group) => (
-              <tr key={group.id}>
-                <td>
-                  <div className="cell-title">{group.label}</div>
-                  <div className="cell-sub truncate" style={{ maxWidth: '220px' }}>
-                    {group.url}
-                  </div>
-                </td>
-                <td>
-                  <Badge tone={group.posting_mode === 'nickname' ? 'info' : 'neutral'}>
-                    {group.posting_mode === 'nickname' ? 'Biệt danh' : 'Ẩn danh'}
-                  </Badge>
-                </td>
-                <td>
-                  <Badge tone={TONE[group.screening_status] ?? 'neutral'}>
-                    {LABELS[group.screening_status] ?? group.screening_status}
-                  </Badge>
-                </td>
-                <td>
-                  <div className="cell-sub">
-                    {group.last_checked_at
-                      ? new Date(group.last_checked_at).toLocaleString('vi-VN')
-                      : 'chưa kiểm tra'}
-                  </div>
-                  <div className="cell-sub">
-                    nguồn: {group.screening_source === 'manual' ? 'xác nhận thủ công' : group.screening_source}
-                  </div>
-                </td>
-                <td className="actions">
-                  <Button size="sm" loading={busy === group.id} onClick={() => void recheck(group.id)}>
-                    Kiểm tra lại
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </DataTable>
-        </Card>
-      )}
+      {!loading && rows.length === 0 ? (
+        <EmptyState
+          title="Chưa có cặp Facebook–Group nào cần xác minh"
+          description="Thêm Facebook và group ở mục Nhóm Facebook trước."
+        />
+      ) : null}
 
-      <Alert tone="info">
-        Một lần đăng thành công không có nghĩa các bài sau chắc chắn không cần duyệt. Ưu tiên chỉ quyết định thứ tự giữa các bài đủ điều kiện.
-      </Alert>
+      {!loading && rows.length > 0 ? (
+        <>
+          <div className="stat-row">
+            <Stat label="Cặp đã xác minh" value={counts.verified_posted ?? 0} />
+            <Stat label="Chờ group duyệt" value={counts.pending_group_approval ?? 0} />
+            <Stat label="Chưa xác minh" value={counts.not_tested ?? 0} />
+            <Stat label="Đang xác minh" value={counts.test_in_progress ?? 0} />
+            <Stat label="Xác minh lỗi" value={counts.check_failed ?? 0} />
+            <Stat label="Bị từ chối" value={counts.rejected ?? 0} />
+            <Stat label="Facebook hạn chế" value={counts.restricted_confirmed ?? 0} />
+          </div>
+
+          {running ? (
+            <Alert tone="info">Đang xác minh. Trang tự cập nhật khi có kết quả.</Alert>
+          ) : null}
+
+          <Tabs
+            tabs={FILTERS.map((entry) => ({
+              id: entry.id,
+              label: entry.label,
+              count:
+                entry.id === 'all'
+                  ? rows.length
+                  : entry.id === 'verified'
+                    ? (counts.verified_posted ?? 0)
+                    : entry.id === 'review'
+                      ? (counts.pending_group_approval ?? 0)
+                      : entry.id === 'pending'
+                        ? (counts.not_tested ?? 0)
+                        : entry.id === 'failed'
+                          ? (counts.check_failed ?? 0) + (counts.submitted_unverified ?? 0)
+                          : (counts.restricted_confirmed ?? 0),
+            }))}
+            active={filter}
+            onChange={setFilter}
+          />
+
+          <Card>
+            <DataTable head={['Group', 'Facebook', 'Chế độ', 'Xác minh', 'Thời điểm', 'Bằng chứng', 'Thao tác']}>
+              {visible.map((item) => (
+                <tr key={`${item.group_id}:${item.account_id}`}>
+                  <td>
+                    <div className="cell-title truncate" style={{ maxWidth: '180px' }}>
+                      {item.group_label}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="cell-sub truncate" style={{ maxWidth: '130px' }}>
+                      {item.account_label}
+                    </div>
+                  </td>
+                  <td>
+                    <Badge tone={item.posting_mode === 'nickname' ? 'info' : 'neutral'}>
+                      {item.posting_mode === 'nickname' ? 'Biệt danh' : 'Ẩn danh'}
+                    </Badge>
+                  </td>
+                  <td>
+                    <Badge tone={TONE[item.verification_status] ?? 'neutral'}>
+                      {LABELS[item.verification_status] ?? item.verification_status}
+                    </Badge>
+                  </td>
+                  <td>
+                    <div className="cell-sub">
+                      {item.verified_at
+                        ? new Date(item.verified_at).toLocaleString('vi-VN')
+                        : item.submitted_at
+                          ? `đã gửi ${new Date(item.submitted_at).toLocaleString('vi-VN')}`
+                          : 'chưa xác minh'}
+                    </div>
+                  </td>
+                  <td>
+                    {item.verified_post_url ? (
+                      <a href={item.verified_post_url} target="_blank" rel="noreferrer">
+                        Xem bài xác minh
+                      </a>
+                    ) : (
+                      <div className="cell-sub">{item.reason}</div>
+                    )}
+                  </td>
+                  <td className="actions">
+                    <div className="btn-row" style={{ justifyContent: 'flex-end' }}>
+                      {can('group_posts.create') && item.verification_status === 'not_tested' ? (
+                        <Button size="sm" loading={busy === item.group_id} onClick={() => void verify(item)}>
+                          Xác minh bằng bài đăng
+                        </Button>
+                      ) : null}
+                      {can('groups.manage') ? (
+                        <Button size="sm" loading={busy === item.group_id} onClick={() => void recheck(item)}>
+                          Kiểm tra lại
+                        </Button>
+                      ) : null}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </DataTable>
+          </Card>
+        </>
+      ) : null}
     </div>
   );
 }

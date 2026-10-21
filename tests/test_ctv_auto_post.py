@@ -9,12 +9,19 @@ Facebook.
 from test_app import AuthClient, client  # noqa: F401 (registers the client fixture)
 
 import app as m
+from screening_fixtures import verify_pair
 from scheduler import ctv_allocator
 
 CTV_PASSWORD = "ctv-password-2026-strong"
 
 
 # --- helpers -----------------------------------------------------------------
+
+def inside_window():
+    """Một thời điểm chắc chắn nằm trong khung giờ đăng, không phụ thuộc giờ hệ thống."""
+    from scheduler import time_windows
+    return time_windows.now_in('Asia/Ho_Chi_Minh').replace(hour=10, minute=0)
+
 
 def make_pipeline(admin, name):
     created = admin.post('/api/pipelines', json={'name': name})
@@ -37,8 +44,8 @@ def make_group(admin, pipeline_id, account_id, label, url, screening='priority',
         'pipeline_id': pipeline_id, 'account_id': account_id, 'label': label, 'url': url,
         'approved_target': approved, 'posting_mode': mode, 'nickname': payload_nickname}).json()
     with m.db() as conn:
-        conn.execute("UPDATE groups SET screening_status=?, nickname=? WHERE id=?",
-                     (screening, nickname, group['id']))
+        conn.execute("UPDATE groups SET nickname=? WHERE id=?", (nickname, group['id']))
+        verify_pair(conn, pipeline_id, account_id, group['id'], status=screening)
     return group['id']
 
 
@@ -369,7 +376,7 @@ def test_two_collaborators_never_share_one_facebook_at_the_same_time(client):
     save_config(two, pipeline, topic='B', max_posts_per_account_daily=3)
 
     with m.db() as conn:
-        outcome = ctv_allocator.allocate(conn, pipeline, max_jobs=20)
+        outcome = ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
     assert len(outcome['created']) >= 1
     with m.db() as conn:
         rows = conn.execute("""SELECT account_id, created_by_ctv_id FROM auto_post_jobs
@@ -405,7 +412,7 @@ def test_second_collaborator_is_blocked_from_a_busy_facebook(client):
     one, _ = login_ctv('ctv_busy_b', key)
     save_config(one, pipeline, topic='B')
     with m.db() as conn:
-        outcome = ctv_allocator.allocate(conn, pipeline, max_jobs=20)
+        outcome = ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
     assert outcome['created'] == []
     assert any('CTV khác' in note for note in outcome['skipped'])
     one.close()
@@ -433,7 +440,7 @@ def test_account_daily_limit_counts_every_collaborator(client):
     save_config(two, pipeline, topic='B', max_posts_per_account_daily=5)
 
     with m.db() as conn:
-        ctv_allocator.allocate(conn, pipeline, max_jobs=20)
+        ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
         used = conn.execute("""SELECT COALESCE(SUM(published+reserved),0) FROM posting_counters
                                 WHERE account_id=?""", (account,)).fetchone()[0]
     assert used <= 2, "Hạn mức chung của Facebook không được vượt quá"
@@ -491,8 +498,8 @@ def test_the_same_picture_is_never_posted_twice_in_a_pipeline(client):
     save_config(one, pipeline, topic='A', max_posts_per_account_daily=3)
 
     with m.db() as conn:
-        ctv_allocator.allocate(conn, pipeline, max_jobs=20)
-        ctv_allocator.allocate(conn, pipeline, max_jobs=20)
+        ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
+        ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
         media_ids = [row[0] for row in conn.execute(
             "SELECT media_id FROM auto_post_jobs WHERE pipeline_id=?", (pipeline,)).fetchall()]
     assert len(media_ids) == len(set(media_ids)), "Ảnh không được đăng trùng trong Workspace"
@@ -514,7 +521,7 @@ def test_two_collaborators_never_target_the_same_group(client):
     save_config(two, pipeline, topic='B', max_posts_per_account_daily=3)
 
     with m.db() as conn:
-        ctv_allocator.allocate(conn, pipeline, max_jobs=20)
+        ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
         rows = conn.execute("""SELECT group_id, created_by_ctv_id FROM auto_post_jobs
                                 WHERE pipeline_id=?""", (pipeline,)).fetchall()
     owners = {}
@@ -554,7 +561,7 @@ def test_collaborator_only_sees_its_own_jobs(client):
     save_config(one, pipeline, topic='A')
     save_config(two, pipeline, topic='B')
     with m.db() as conn:
-        ctv_allocator.allocate(conn, pipeline, max_jobs=20)
+        ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
     jobs_one = one.get(f'/api/pipelines/{pipeline}/auto-post/my-jobs').json()['jobs']
     jobs_two = two.get(f'/api/pipelines/{pipeline}/auto-post/my-jobs').json()['jobs']
     assert all(job['created_by_ctv_id'] == first for job in jobs_one)
@@ -669,11 +676,11 @@ def test_pausing_stops_the_scheduler_for_that_collaborator(client):
     one, _ = login_ctv('ctv_paused', key)
     save_config(one, pipeline, topic='A', enabled=False)
     with m.db() as conn:
-        outcome = ctv_allocator.allocate(conn, pipeline, max_jobs=20)
+        outcome = ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
     assert outcome['created'] == []
     one.post(f'/api/pipelines/{pipeline}/auto-post/my-config/activate')
     with m.db() as conn:
-        outcome = ctv_allocator.allocate(conn, pipeline, max_jobs=20)
+        outcome = ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
     assert outcome['created'], "Bật lại thì phải xếp lịch được"
     one.close()
 
@@ -693,7 +700,7 @@ def test_a_job_keeps_the_account_it_was_planned_for(client):
     save_config(one, pipeline, topic='A', account_scope='selected',
                 selected_account_ids=[first])
     with m.db() as conn:
-        ctv_allocator.allocate(conn, pipeline, max_jobs=20)
+        ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
         rows = conn.execute("""SELECT account_id FROM auto_post_jobs
                                 WHERE pipeline_id=?""", (pipeline,)).fetchall()
     assert rows, "Phải có job được xếp lịch"

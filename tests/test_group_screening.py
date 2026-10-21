@@ -5,9 +5,11 @@ import pytest
 from test_app import AuthClient, client  # noqa: F401 (registers the client fixture)
 
 import app as m
+from screening_fixtures import verify_pair
+from services import group_verification
 from services.group_screening import (
-    STATUS_FAILED, STATUS_PRIORITY, STATUS_REVIEW, STATUS_RESTRICTED, STATUS_UNKNOWN,
-    classify, is_publishable, priority_index,
+    STATUS_FAILED, STATUS_NOT_ACCESSIBLE, STATUS_NOT_MEMBER, STATUS_PRIORITY, STATUS_REVIEW,
+    STATUS_RESTRICTED, STATUS_UNKNOWN, classify, is_publishable, priority_index,
 )
 
 
@@ -110,17 +112,54 @@ def test_group_without_evidence_is_unknown():
     assert confidence == 0
 
 
-def test_group_without_access_is_restricted():
+def test_group_without_access_is_not_a_restriction():
+    """Không xem được nội dung group không phải là bị hạn chế quyền đăng."""
     status, source, _ = classify({
         "check_status": "restricted", "accessible": False, "is_member": False, "can_post": False})
+    assert status == STATUS_NOT_ACCESSIBLE
+    assert source == "browser_check"
+
+
+def test_group_without_membership_is_not_a_restriction():
+    """Chưa tham gia group không phải là Facebook hạn chế đăng bài."""
+    status, source, _ = classify({"check_status": "not_member", "accessible": True,
+                                  "is_member": False, "can_post": None})
+    assert status == STATUS_NOT_MEMBER
+    assert source == "browser_check"
+
+
+def test_group_without_composer_is_not_a_restriction():
+    """Không tìm thấy ô soạn bài không có nghĩa là bị hạn chế."""
+    status, _, _ = classify({"check_status": "needs_review", "accessible": True,
+                             "is_member": True, "can_post": None})
+    assert status == STATUS_UNKNOWN
+
+
+def test_a_group_that_cannot_be_viewed_is_not_a_restriction():
+    status, _, _ = classify({"check_status": "not_accessible", "accessible": False,
+                             "is_member": None, "can_post": None})
+    assert status == STATUS_NOT_ACCESSIBLE
+
+
+def test_a_clear_notice_from_facebook_is_a_restriction():
+    status, source, _ = classify({"check_status": "restricted", "accessible": True,
+                                  "is_member": True, "can_post": False})
     assert status == STATUS_RESTRICTED
     assert source == "browser_check"
 
 
-def test_group_without_membership_is_restricted():
-    status, _, _ = classify({"check_status": "ok", "accessible": True, "is_member": False,
-                              "can_post": False})
-    assert status == STATUS_RESTRICTED
+def test_a_browser_failure_is_never_a_restriction():
+    for failed in ("error", "busy", "failed", "timeout"):
+        status, _, _ = classify({"check_status": failed, "accessible": False,
+                                 "is_member": False, "can_post": False})
+        assert status == STATUS_FAILED, f"{failed} không được coi là hạn chế"
+
+
+def test_a_missing_answer_is_never_a_restriction():
+    """Không có câu trả lời nào thì không kết luận gì cả."""
+    status, _, _ = classify({"check_status": "", "accessible": None, "is_member": None,
+                             "can_post": None})
+    assert status == STATUS_UNKNOWN
 
 
 def test_group_without_composer_is_restricted():
@@ -182,7 +221,9 @@ def test_screening_stores_the_classification(client, monkeypatch):
         stored = conn.execute("SELECT screening_status FROM groups WHERE id=?", (group['id'],)).fetchone()
     assert row['moderation_status'] == STATUS_REVIEW
     assert row['verification_source'] == 'browser_check'
-    assert stored['screening_status'] == STATUS_REVIEW
+    # Trạng thái của group đến từ bằng chứng đăng bài, không phải từ quan
+    # sát của trình duyệt.
+    assert stored['screening_status'] == group_verification.NOT_TESTED
 
 
 def test_screening_results_endpoint_lists_the_groups(client, monkeypatch):
@@ -216,6 +257,9 @@ def test_priority_endpoint_orders_the_groups(client, monkeypatch):
         m.store_screening_result(conn, pipeline, account, review,
                                  {"status": "ok", "accessible": True, "is_member": True,
                                   "can_post": True, "requires_approval": True})
+        # Bằng chứng đăng bài thật cho cả hai group.
+        verify_pair(conn, pipeline, account, priority, status="priority")
+        verify_pair(conn, pipeline, account, review, status="review")
     response = client.get(f'/api/pipelines/{pipeline}/groups/priority')
     assert response.status_code == 200
     order = [item['id'] for item in response.json()['groups']]
@@ -274,6 +318,9 @@ def test_a_verified_group_is_served_before_a_review_group(client, monkeypatch):
         m.store_screening_result(conn, pipeline, account, review,
                                  {"status": "ok", "accessible": True, "is_member": True,
                                   "can_post": True, "requires_approval": True})
+        # Bằng chứng đăng bài thật cho cả hai group.
+        verify_pair(conn, pipeline, account, priority, status="priority")
+        verify_pair(conn, pipeline, account, review, status="review")
     image = client.post('/api/uploads', params={'pipeline_id': pipeline},
                         files={'file': ('b.jpg', b'\xff\xd8\xff' + b'0' * 60, 'image/jpeg')}).json()['path']
     scheduled = m.iso(m.now() - m.timedelta(minutes=5))

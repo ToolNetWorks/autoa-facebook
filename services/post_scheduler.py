@@ -15,7 +15,8 @@ import logging
 from datetime import datetime, timezone
 
 from services import ai_provider, duplicate_guard, posting_limits
-from services.auto_posting import create_caption, eligible_groups
+from services import group_eligibility, group_verification
+from services.auto_posting import create_caption
 from services.caption_validator import analyze_caption
 from services.image_selection import select_media
 
@@ -95,28 +96,37 @@ def _job_key(pipeline_id: int, account_id: int, group_id: int, media_id: int, da
     return f"{int(pipeline_id)}:{int(account_id)}:{int(group_id)}:{int(media_id)}:{day}"
 
 
-def group_blockers(groups: list[dict]) -> list[dict]:
+def group_blockers(groups: list[dict], decisions: dict | None = None) -> list[dict]:
     """Vì sao một group chưa được đưa vào lịch.
 
     Lý do viết bằng chữ để người quản trị hiểu được, không phải mã lỗi.
+    ``decisions`` là quyết định của từng cặp Facebook–Group, để lý do nói
+    đúng về tài khoản nào chưa đủ điều kiện.
     """
     blockers = []
     for group in groups:
         reason = ""
         status = group.get("screening_status") or "unknown"
+        pair = (decisions or {}).get(group.get("id")) or {}
         if not group.get("enabled"):
             reason = "Group đang tạm dừng"
         elif group.get("status") != "active":
             reason = "Group không hoạt động"
         elif not group.get("approved_target"):
             reason = "Chưa được duyệt làm group đích"
-        elif status == "unknown":
-            reason = "Chưa kiểm tra quyền đăng"
-        elif status == "restricted":
+        elif status == group_verification.NOT_TESTED:
+            reason = "Chưa có bằng chứng đăng bài thật cho group này"
+        elif status == group_verification.TEST_IN_PROGRESS:
+            reason = "Đang xác minh quyền đăng"
+        elif status == group_verification.SUBMITTED_UNVERIFIED:
+            reason = "Đã gửi bài nhưng chưa xác nhận được Facebook tiếp nhận"
+        elif status == group_verification.REJECTED:
+            reason = "Bài đăng bị từ chối"
+        elif status == group_verification.RESTRICTED_CONFIRMED:
             reason = "Facebook hạn chế quyền đăng trong group này"
-        elif status == "failed":
+        elif status == group_verification.CHECK_FAILED:
             reason = "Kiểm tra quyền đăng không thành công"
-        elif status not in ("priority", "review"):
+        elif status not in group_verification.SERVABLE_STATUSES:
             reason = "Chưa xác minh đủ điều kiện đăng tự động"
         elif (group.get("posting_mode") == "nickname"
               and not (group.get("nickname") or "").strip()):
@@ -125,8 +135,24 @@ def group_blockers(groups: list[dict]) -> list[dict]:
             reason = "Phiên đăng nhập Facebook đã hết hạn"
         if reason:
             blockers.append({"group_id": group.get("id"), "label": group.get("label"),
-                             "screening_status": status, "reason": reason})
+                             "screening_status": status, "reason": reason,
+                             "action": pair.get("action", ""),
+                             "eligible_account_ids": pair.get("eligible_account_ids", [])})
     return blockers
+
+
+def pair_decisions(conn, pipeline_id: int, groups: list[dict]) -> dict:
+    """Quyết định của từng cặp Facebook–Group, theo từng group."""
+    decisions = {}
+    for group in groups:
+        allowed = []
+        for account_id in group_eligibility.accounts_of(conn, pipeline_id, group):
+            decision = group_eligibility.pair_decision(conn, pipeline_id, account_id,
+                                                        group["id"], group)
+            if decision["eligible"]:
+                allowed.append(account_id)
+        decisions[group["id"]] = {"eligible_account_ids": allowed}
+    return decisions
 
 
 def plan(conn, pipeline_id: int, moment: datetime | None = None,
@@ -140,25 +166,25 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
     day = posting_limits.day_of(moment)
     accounts = _account_rows(conn, pipeline_id, settings)
     groups = _group_rows(conn, pipeline_id, settings)
-    eligible = eligible_groups(groups)
+    decisions = pair_decisions(conn, pipeline_id, groups)
+    eligible = group_eligibility.eligible_pairs(conn, pipeline_id, groups)
     media = _media_rows(conn, pipeline_id)
     provider_config = provider_config or ai_provider.load_config()
 
     jobs = []
     notes = []
     no_media = False
+    eligible_by_account: dict[str, int] = {}
     if not eligible:
-        notes.append("Chưa có group nào đủ điều kiện đăng tự động trong Workspace")
+        notes.append("Chưa có cặp Facebook–Group nào đủ điều kiện đăng tự động trong Workspace")
     if not accounts:
         notes.append("Chưa có Facebook nào đủ điều kiện để đăng")
     used_media: set[int] = set()
     for account in accounts:
         state = posting_limits.account_state(conn, account["id"], settings, moment)
         own_groups = [group for group in eligible
-                      if group.get("account_id") == account["id"]
-                      or group.get("id") in {row["group_id"] for row in conn.execute(
-                          "SELECT group_id FROM group_accounts WHERE account_id=? AND status='active'",
-                          (account["id"],)).fetchall()}]
+                      if account["id"] in group.get("eligible_account_ids", [])]
+        eligible_by_account[str(account["id"])] = len(own_groups)
         if state["paused"]:
             notes.append(f"{account['label']}: đang tạm dừng")
             continue
@@ -217,6 +243,9 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
             state["used"] += 1
     return {"enabled": True, "jobs": jobs, "notes": notes, "no_media": no_media, "accounts": accounts,
             "groups": groups, "eligible_groups": [group["id"] for group in eligible],
+            "decisions": decisions,
+            "eligible_by_account": eligible_by_account,
+            "blockers": group_blockers(groups, decisions),
             "day": day}
 
 
@@ -272,7 +301,12 @@ def distribute(conn, pipeline_id: int, moment: datetime | None = None,
                         "media_id": job["media_id"],
                         "status": STATUS_PENDING if settings.get("require_approval", True) else STATUS_APPROVED})
     return {"created": created, "skipped": skipped, "day": day,
-            "no_media": bool(outcome.get("no_media"))}
+            "no_media": bool(outcome.get("no_media")),
+            "planned": len(outcome.get("jobs", [])),
+            "notes": outcome.get("notes", []),
+            "blockers": outcome.get("blockers", []),
+            "eligible_groups": outcome.get("eligible_groups", []),
+            "eligible_by_account": outcome.get("eligible_by_account", {})}
 
 
 def _sha256_of(conn, media_id: int) -> str:

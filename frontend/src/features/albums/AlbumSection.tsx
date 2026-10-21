@@ -1,95 +1,149 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/services/apiClient';
 import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Field';
 import { Modal } from '@/components/ui/Modal';
-import { Alert, Badge, EmptyState, Skeleton, Tabs } from '@/components/ui/Surfaces';
+import { Alert, Badge, EmptyState, ErrorState, Skeleton, Tabs } from '@/components/ui/Surfaces';
+import { usePermissions } from '@/hooks/usePermissions';
 import type { MediaAlbum, MediaAsset } from '@/types/api';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
 const FILTERS = [
   { id: 'all', label: 'Tất cả' },
   { id: 'usable', label: 'Khả dụng' },
-  { id: 'review', label: 'Cần duyệt' },
+  { id: 'review', label: 'Cần xem xét' },
+  { id: 'failed', label: 'Kiểm tra lỗi' },
   { id: 'saved', label: 'Đã lưu' },
 ];
 
+/** How long the page keeps an eye on the analysis before giving up. */
+const POLL_LIMIT_MS = 5 * 60 * 1000;
+const POLL_INTERVAL_MS = 4000;
+
 export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
+  const { can } = usePermissions();
   const { push } = useToast();
   const [album, setAlbum] = useState<MediaAlbum | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [uploadCount, setUploadCount] = useState(0);
   const [detail, setDetail] = useState<MediaAsset | null>(null);
+  const [busy, setBusy] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const pollUntil = useRef(0);
 
-  async function load() {
+  const load = useCallback(async (quiet = false) => {
     if (!workspace.pipelineId) {
       setLoading(false);
-      return;
+      return null;
     }
-    setLoading(true);
+    if (!quiet) setLoading(true);
     try {
       const result = await api.get<MediaAlbum>(`/api/pipelines/${workspace.pipelineId}/media`);
       setAlbum(result);
+      setLoadError(null);
+      return result;
     } catch (failure) {
-      push(failure instanceof Error ? failure.message : 'Không tải được album', 'error');
+      if (!quiet) {
+        setLoadError(failure instanceof Error ? failure.message : 'Không tải được Album');
+      }
+      return null;
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
-  }
+  }, [workspace.pipelineId]);
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspace.pipelineId]);
+  }, [load]);
+
+  const items = album?.media ?? [];
+  const waiting = items.some((item) => item.state === 'uploaded' || item.state === 'analyzing');
+
+  // While a picture is still being checked the page keeps itself up to date,
+  // so the collaborator sees the result without reloading.
+  useEffect(() => {
+    if (!waiting || Date.now() > pollUntil.current) return;
+    const timer = window.setTimeout(() => {
+      void load(true);
+    }, POLL_INTERVAL_MS);
+    return () => window.clearTimeout(timer);
+  }, [waiting, items, load]);
 
   async function upload(files: FileList | null) {
     if (!files || files.length === 0) return;
     setUploading(true);
+    setUploadCount(files.length);
     try {
       const form = new FormData();
       Array.from(files).forEach((file) => form.append('files', file));
-      const result = await api.upload<{ count: number }>(`/api/pipelines/${workspace.pipelineId}/media/upload`, form);
-      push(`Đã tải ${result.count} ảnh, hệ thống đang phân tích`, 'success');
-      await load();
+      const result = await api.upload<{ count: number }>(
+        `/api/pipelines/${workspace.pipelineId}/media/upload`,
+        form,
+      );
+      pollUntil.current = Date.now() + POLL_LIMIT_MS;
+      push(`Đã tải ${result.count} ảnh, hệ thống đang kiểm tra`, 'success');
+      await load(true);
     } catch (failure) {
       push(failure instanceof Error ? failure.message : 'Không tải được ảnh', 'error');
     } finally {
       setUploading(false);
+      setUploadCount(0);
       if (fileInput.current) fileInput.current.value = '';
     }
   }
 
   async function patchMedia(media: MediaAsset, body: Record<string, unknown>) {
+    setBusy(media.id);
     try {
       await api.patch(`/api/pipelines/${workspace.pipelineId}/media/${media.id}`, body);
-      await load();
+      await load(true);
       setDetail(null);
     } catch (failure) {
       push(failure instanceof Error ? failure.message : 'Không cập nhật được ảnh', 'error');
+    } finally {
+      setBusy(null);
     }
   }
 
   async function removeMedia(media: MediaAsset) {
+    setBusy(media.id);
     try {
       await api.delete(`/api/pipelines/${workspace.pipelineId}/media/${media.id}`);
       push('Đã xóa ảnh', 'success');
       setDetail(null);
-      await load();
+      await load(true);
     } catch (failure) {
       push(failure instanceof Error ? failure.message : 'Không xóa được ảnh', 'error');
+    } finally {
+      setBusy(null);
     }
   }
 
-  const items = album?.media ?? [];
+  async function retryAnalysis(media: MediaAsset) {
+    setBusy(media.id);
+    try {
+      await api.post(`/api/pipelines/${workspace.pipelineId}/media/${media.id}/analyze`);
+      pollUntil.current = Date.now() + POLL_LIMIT_MS;
+      push('Đã yêu cầu kiểm tra lại, chờ kết quả', 'info');
+      await load(true);
+    } catch (failure) {
+      push(failure instanceof Error ? failure.message : 'Không kiểm tra lại được ảnh', 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return items.filter((item) => {
-      if (filter === 'usable' && !(item.usable && !item.locked)) return false;
-      if (filter === 'review' && item.safety_status === 'pass') return false;
+      if (filter === 'usable' && item.state !== 'ready') return false;
+      if (filter === 'review' && item.state !== 'needs_review') return false;
+      if (filter === 'failed' && item.state !== 'check_failed') return false;
       if (filter === 'saved' && !item.saved) return false;
       if (!needle) return true;
       return (
@@ -100,12 +154,16 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
     });
   }, [items, filter, search]);
 
+  const counts = album?.counts;
+
   return (
     <div className="stack">
       <div className="section-title">
         <div>
           <h2>Album ảnh</h2>
-          <p className="hint">Kho ảnh riêng của Workspace này. Ảnh được phân tích trước khi dùng cho lịch đăng.</p>
+          <p className="hint">
+            Kho ảnh của Workspace này. Ảnh kiểm tra đạt thì dùng được ngay cho lịch đăng.
+          </p>
         </div>
         <div className="btn-row">
           <input
@@ -122,7 +180,24 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
         </div>
       </div>
 
-      {uploading ? <Alert tone="info">Đang tải ảnh lên và chờ phân tích...</Alert> : null}
+      {uploading ? (
+        <Alert tone="info">Đang tải {uploadCount} ảnh lên, chờ hệ thống kiểm tra...</Alert>
+      ) : null}
+
+      {!uploading && waiting ? (
+        <Alert tone="info">Hệ thống đang kiểm tra ảnh mới. Trang tự cập nhật khi có kết quả.</Alert>
+      ) : null}
+
+      {loadError ? (
+        <ErrorState
+          title="Không thể tải Album. Vui lòng thử lại."
+          action={
+            <Button size="sm" onClick={() => void load()}>
+              Thử lại
+            </Button>
+          }
+        />
+      ) : null}
 
       <div className="row" style={{ gap: 'var(--sp-3)' }}>
         <Input
@@ -140,14 +215,14 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
           label: entry.label,
           count:
             entry.id === 'all'
-              ? items.length
-              : items.filter((item) =>
-                  entry.id === 'usable'
-                    ? item.usable && !item.locked
-                    : entry.id === 'review'
-                      ? item.safety_status !== 'pass'
-                      : item.saved,
-                ).length,
+              ? (counts?.total ?? 0)
+              : entry.id === 'usable'
+                ? (counts?.usable ?? 0)
+                : entry.id === 'review'
+                  ? (counts?.needs_review ?? 0)
+                  : entry.id === 'failed'
+                    ? (counts?.failed ?? 0)
+                    : (counts?.saved ?? 0),
         }))}
         active={filter}
         onChange={setFilter}
@@ -161,7 +236,7 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
         </div>
       ) : null}
 
-      {!loading && visible.length === 0 ? (
+      {!loading && !loadError && visible.length === 0 ? (
         <EmptyState
           title={items.length === 0 ? 'Album còn trống' : 'Không có ảnh phù hợp'}
           description={
@@ -187,16 +262,13 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
                   {item.width}×{item.height} · {Math.round(item.size_bytes / 1024)} KB
                 </span>
                 <span className="badge-row">
-                  <Badge tone={item.safety_status === 'pass' ? 'ok' : item.safety_status === 'blocked' ? 'bad' : 'warn'}>
-                    {item.safety_status === 'pass'
-                      ? 'An toàn'
-                      : item.safety_status === 'blocked'
-                        ? 'Bị chặn'
-                        : 'Cần duyệt'}
-                  </Badge>
+                  <Badge tone={item.state_tone}>{item.state_label}</Badge>
                   {item.saved ? <Badge tone="info">Đã lưu</Badge> : null}
                   {item.locked ? <Badge tone="neutral">Đã khóa</Badge> : null}
                 </span>
+                {item.state === 'check_failed' || item.state === 'needs_review' ? (
+                  <span className="cell-sub">{item.reason}</span>
+                ) : null}
               </span>
             </button>
           ))}
@@ -206,13 +278,13 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
       <Modal
         open={detail !== null}
         title={detail?.original_name ?? ''}
-        description={detail?.description || 'Ảnh chưa được mô tả.'}
+        description={detail?.state_label ?? ''}
         onClose={() => setDetail(null)}
         footer={
           <>
             <Button onClick={() => setDetail(null)}>Đóng</Button>
-            {detail ? (
-              <Button variant="danger" onClick={() => void removeMedia(detail)}>
+            {detail && can('media.delete') ? (
+              <Button variant="danger" onClick={() => void removeMedia(detail)} loading={busy === detail.id}>
                 Xóa ảnh
               </Button>
             ) : null}
@@ -227,14 +299,14 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
               style={{ width: '100%', borderRadius: 'var(--r-md)', maxHeight: '46vh', objectFit: 'contain' }}
             />
             <div className="badge-row">
-              <Badge tone={detail.safety_status === 'pass' ? 'ok' : detail.safety_status === 'blocked' ? 'bad' : 'warn'}>
-                An toàn: {detail.safety_status}
-              </Badge>
+              <Badge tone={detail.state_tone}>{detail.state_label}</Badge>
               <Badge tone="neutral">Dùng {detail.usage_count} lần</Badge>
               {detail.last_used_at ? (
                 <Badge tone="neutral">Dùng lần cuối {new Date(detail.last_used_at).toLocaleString('vi-VN')}</Badge>
               ) : null}
             </div>
+            <p className="hint">{detail.reason}</p>
+            {detail.description ? <p className="hint">{detail.description}</p> : null}
             {detail.tags.length > 0 ? (
               <div className="tag-list">
                 {detail.tags.map((tag) => (
@@ -244,21 +316,44 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
                 ))}
               </div>
             ) : null}
-            <div className="btn-row">
+            {detail.state === 'check_failed' ? (
               <Button
+                variant="primary"
                 size="sm"
-                variant={detail.usable ? 'default' : 'primary'}
-                onClick={() => void patchMedia(detail, { usable: !detail.usable })}
+                loading={busy === detail.id}
+                onClick={() => void retryAnalysis(detail)}
               >
-                {detail.usable ? 'Bỏ cho phép dùng' : 'Cho phép dùng'}
+                Kiểm tra lại
               </Button>
-              <Button size="sm" onClick={() => void patchMedia(detail, { locked: !detail.locked })}>
-                {detail.locked ? 'Mở khóa' : 'Tạm khóa'}
-              </Button>
-              <Button size="sm" onClick={() => void patchMedia(detail, { saved: !detail.saved })}>
-                {detail.saved ? 'Bỏ lưu' : 'Lưu cho lịch sau'}
-              </Button>
-            </div>
+            ) : null}
+            {can('media.edit') ? (
+              <div className="btn-row">
+                {detail.can_be_usable ? (
+                  <Button
+                    size="sm"
+                    variant={detail.usable ? 'default' : 'primary'}
+                    loading={busy === detail.id}
+                    onClick={() => void patchMedia(detail, { usable: !detail.usable })}
+                  >
+                    {detail.usable ? 'Bỏ cho phép dùng' : 'Cho phép dùng'}
+                  </Button>
+                ) : null}
+                <Button
+                  size="sm"
+                  loading={busy === detail.id}
+                  onClick={() => void patchMedia(detail, { locked: !detail.locked })}
+                >
+                  {detail.locked ? 'Mở khóa' : 'Tạm khóa'}
+                </Button>
+                <Button
+                  size="sm"
+                  loading={busy === detail.id}
+                  onClick={() => void patchMedia(detail, { saved: !detail.saved })}
+                >
+                  {detail.saved ? 'Bỏ lưu' : 'Lưu cho lịch sau'}
+                </Button>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </Modal>

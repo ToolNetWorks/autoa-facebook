@@ -6,6 +6,7 @@ import { Input, Select, Textarea } from '@/components/ui/Field';
 import { Switch } from '@/components/ui/Choice';
 import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Skeleton, Stat } from '@/components/ui/Surfaces';
 import { ScheduleModal } from '@/features/auto-posting/ScheduleModal';
+import { GroupStatusList } from '@/features/auto-posting/GroupStatusList';
 import type { GroupRow } from '@/types/api';
 
 interface AccountLimit {
@@ -88,6 +89,7 @@ export function SharedAutoPostPanel({
   const [forbidden, setForbidden] = useState(false);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
+  const [issues, setIssues] = useState<string[]>([]);
   const [advanced, setAdvanced] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
 
@@ -153,17 +155,26 @@ export function SharedAutoPostPanel({
 
   async function runNow() {
     setRunning(true);
+    setIssues([]);
     try {
-      const result = await api.post<{ created: unknown[]; skipped: string[] }>(
-        `/api/pipelines/${pipelineId}/auto-post/distribute`,
-      );
+      const result = await api.post<{
+        created: unknown[];
+        skipped: string[];
+        notes: string[];
+        blockers: { group_id: number; label: string; reason: string; action: string }[];
+      }>(`/api/pipelines/${pipelineId}/auto-post/distribute`);
       const created = result.created.length;
-      push(
-        created > 0
-          ? `Đã xếp lịch ${created} bài theo hạn mức từng Facebook`
-          : result.skipped[0] || 'Chưa có bài nào đủ điều kiện để xếp lịch',
-        created > 0 ? 'success' : 'info',
-      );
+      if (created > 0) {
+        push(`Đã xếp lịch ${created} bài theo hạn mức từng Facebook`, 'success');
+      } else {
+        const reasons = [
+          ...(result.notes ?? []),
+          ...(result.blockers ?? []).map((item) => `${item.label}: ${item.reason}`),
+        ];
+        const unique = Array.from(new Set(reasons));
+        setIssues(unique);
+        push(unique[0] || 'Chưa có group nào đủ điều kiện để xếp lịch', 'info');
+      }
       await load();
     } catch (failure) {
       push(failure instanceof Error ? failure.message : 'Không xếp lịch được', 'error');
@@ -225,6 +236,16 @@ export function SharedAutoPostPanel({
         <Stat label="Bài đang chờ" value={totals.waiting} />
         <Stat label="Bài bị chặn trùng" value={totals.blocked_duplicate} muted={totals.blocked_duplicate === 0} />
       </div>
+
+      {issues.length > 0 ? (
+        <Alert tone="warn" title="Chưa tạo được bài nào.">
+          <ul style={{ margin: '0', paddingLeft: '18px' }}>
+            {issues.slice(0, 6).map((issue) => (
+              <li key={issue}>{issue}</li>
+            ))}
+          </ul>
+        </Alert>
+      ) : null}
 
       {totals.eligible_groups === 0 && totals.total_groups > 0 ? (
         <Alert tone="warn">
@@ -395,6 +416,13 @@ export function SharedAutoPostPanel({
           </div>
         </div>
       </Card>
+
+      <GroupStatusList
+        pipelineId={pipelineId}
+        accounts={dashboard.accounts.map((item) => ({ id: item.account_id, label: item.label }))}
+        groups={groups.map((group) => ({ id: group.id, label: group.label, account_id: group.account_id }))}
+        selectedGroupIds={settings.group_ids}
+      />
 
       <Card title="Hạn mức theo từng Facebook" description="Số bài đã dùng hôm nay và phần còn lại.">
         {limits.length === 0 ? (

@@ -6,6 +6,7 @@ import { Input, Select, Textarea } from '@/components/ui/Field';
 import { Switch } from '@/components/ui/Choice';
 import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Skeleton } from '@/components/ui/Surfaces';
 import { Modal } from '@/components/ui/Modal';
+import { GroupStatusList } from '@/features/auto-posting/GroupStatusList';
 import type { CtvAutoPostConfig, CtvAutoPostJob, CtvAutoPostSettings } from '@/types/api';
 import type { FacebookAccount, GroupRow } from '@/types/api';
 
@@ -539,6 +540,13 @@ export function CtvAutoPostPanel({
           </div>
         </div>
       </Card>
+
+      <GroupStatusList
+        pipelineId={pipelineId}
+        accounts={accounts.map((account) => ({ id: account.id, label: account.label }))}
+        groups={groups.map((group) => ({ id: group.id, label: group.label, account_id: group.account_id }))}
+        selectedGroupIds={draft.selected_group_ids}
+      />
 
       <Card title="Bài của tôi" description="Những bài hệ thống đã xếp lịch cho bạn.">
         {jobs.length === 0 ? (

@@ -9,6 +9,7 @@ import pytest
 from test_app import AuthClient, client  # noqa: F401 (fixture)
 
 import app as m
+from screening_fixtures import verify_pair
 from services import auto_posting
 from services.image_selection import score_candidate, select_media
 from services.media_store import StorageError, store_image
@@ -37,6 +38,8 @@ def make_workspace(client, name):
     group = client.post('/api/groups', json={'pipeline_id': pipeline, 'account_id': account,
                                              'label': 'Group', 'url': 'https://www.facebook.com/groups/778899/',
                                              'approved_target': True}).json()['id']
+    with m.db() as conn:
+        verify_pair(conn, pipeline, account, group)
     return pipeline, account, group
 
 

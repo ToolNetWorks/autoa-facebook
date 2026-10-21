@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from test_app import client  # noqa: F401 (registers the client fixture)
 
 import app as m
+from screening_fixtures import verify_pair
 from scheduler import account_limits, group_cooldowns, job_allocator, time_windows
 from services import ai_provider
 
@@ -30,7 +31,7 @@ def make_group(admin, pipeline_id, account_id, label, url, screening='priority')
         'pipeline_id': pipeline_id, 'account_id': account_id, 'label': label, 'url': url,
         'approved_target': True, 'posting_mode': 'anonymous'}).json()
     with m.db() as conn:
-        conn.execute("UPDATE groups SET screening_status=? WHERE id=?", (screening, group['id']))
+        verify_pair(conn, pipeline_id, account_id, group['id'], status=screening)
     return group['id']
 
 

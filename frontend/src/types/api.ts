@@ -119,6 +119,15 @@ export interface GroupRow {
   shared: boolean;
 }
 
+/** The six states of a picture in the album. They are never merged. */
+export type MediaState =
+  | 'uploaded'
+  | 'analyzing'
+  | 'ready'
+  | 'needs_review'
+  | 'blocked'
+  | 'check_failed';
+
 export interface MediaAsset {
   id: number;
   pipeline_id: number;
@@ -139,11 +148,28 @@ export interface MediaAsset {
   created_at: string;
   tags: string[];
   usage_history_count?: number;
+  /** The state of the picture, worked out by the backend. */
+  state: MediaState;
+  state_label: string;
+  state_tone: 'ok' | 'warn' | 'bad' | 'neutral' | 'info';
+  /** A short sentence the collaborator can act on. */
+  reason: string;
+  can_retry: boolean;
+  can_be_usable: boolean;
 }
 
 export interface MediaAlbum {
   media: MediaAsset[];
-  counts: { total: number; usable: number; needs_review: number; locked: number; saved: number };
+  counts: {
+    total: number;
+    usable: number;
+    needs_review: number;
+    blocked: number;
+    failed: number;
+    waiting: number;
+    locked: number;
+    saved: number;
+  };
 }
 
 export interface JobRow {

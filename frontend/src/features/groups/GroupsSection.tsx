@@ -7,30 +7,37 @@ import { Modal } from '@/components/ui/Modal';
 import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Tabs } from '@/components/ui/Surfaces';
 import { Radio } from '@/components/ui/Choice';
 import { usePermissions } from '@/hooks/usePermissions';
+import { JoinControls, useMemberships } from '@/features/groups/JoinControls';
 import type { GroupRow } from '@/types/api';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
 const STATUS_TONE: Record<string, 'ok' | 'warn' | 'bad' | 'neutral' | 'info'> = {
-  priority: 'ok',
-  review: 'warn',
-  restricted: 'bad',
-  failed: 'bad',
-  unknown: 'neutral',
+  verified_posted: 'ok',
+  pending_group_approval: 'warn',
+  submitted_unverified: 'warn',
+  test_in_progress: 'info',
+  rejected: 'bad',
+  restricted_confirmed: 'bad',
+  check_failed: 'bad',
+  not_tested: 'neutral',
 };
 
 const STATUS_LABEL: Record<string, string> = {
-  priority: 'Đăng trực tiếp',
-  review: 'Cần Admin duyệt',
-  restricted: 'Bị hạn chế',
-  failed: 'Lỗi kiểm tra',
-  unknown: 'Chưa kiểm tra',
+  verified_posted: 'Đã xác minh đăng',
+  pending_group_approval: 'Chờ group duyệt',
+  submitted_unverified: 'Đã gửi, chưa xác nhận',
+  test_in_progress: 'Đang xác minh',
+  rejected: 'Bị từ chối',
+  restricted_confirmed: 'Facebook hạn chế',
+  check_failed: 'Chưa xác minh được',
+  not_tested: 'Chưa xác minh',
 };
 
 const FILTERS = [
   { id: 'all', label: 'Tất cả' },
-  { id: 'ready', label: 'Sẵn sàng đăng' },
-  { id: 'review', label: 'Chờ duyệt' },
-  { id: 'blocked', label: 'Bị hạn chế' },
+  { id: 'ready', label: 'Đã xác minh' },
+  { id: 'review', label: 'Chờ group duyệt' },
+  { id: 'blocked', label: 'Chưa đủ điều kiện' },
 ];
 
 interface Draft {
@@ -68,12 +75,15 @@ export function GroupsSection({ workspace }: { workspace: WorkspaceData }) {
   }, []);
 
   const groups = workspace.groups;
+  const memberships = useMemberships(workspace.pipelineId);
 
   const visible = useMemo(() => {
     return groups.filter((group) => {
-      if (filter === 'ready') return group.screening_status === 'priority' || group.screening_status === 'review';
-      if (filter === 'review') return group.screening_status === 'review';
-      if (filter === 'blocked') return group.screening_status === 'restricted' || group.screening_status === 'failed';
+      if (filter === 'ready') return group.screening_status === 'verified_posted';
+      if (filter === 'review') return group.screening_status === 'pending_group_approval';
+      if (filter === 'blocked') {
+        return !['verified_posted', 'pending_group_approval'].includes(group.screening_status);
+      }
       return true;
     });
   }, [groups, filter]);
@@ -241,7 +251,7 @@ export function GroupsSection({ workspace }: { workspace: WorkspaceData }) {
         <EmptyState title="Chưa có group nào" description="Thêm group bằng link để bắt đầu." />
       ) : (
         <Card>
-          <DataTable head={['Group', 'Tài khoản', 'Chế độ', 'Kiểm tra', 'Nguồn', 'Thao tác']}>
+          <DataTable head={['Group', 'Tài khoản', 'Chế độ', 'Xác minh', 'Thành viên', 'Nguồn', 'Thao tác']}>
             {visible.map((group) => (
               <tr key={group.id}>
                 <td>
@@ -264,8 +274,20 @@ export function GroupsSection({ workspace }: { workspace: WorkspaceData }) {
                   <div className="cell-sub">
                     {group.last_checked_at
                       ? new Date(group.last_checked_at).toLocaleString('vi-VN')
-                      : 'chưa kiểm tra'}
+                      : 'chưa xác minh'}
                   </div>
+                </td>
+                <td>
+                  <JoinControls
+                    pipelineId={workspace.pipelineId ?? 0}
+                    groupId={group.id}
+                    membership={memberships.byGroup.get(group.id)}
+                    canManage={can('groups.manage')}
+                    onChanged={() => {
+                      void memberships.reload(true);
+                      workspace.reloadGroups();
+                    }}
+                  />
                 </td>
                 <td>
                   <Badge tone={group.owner_user_id ? 'info' : 'neutral'}>

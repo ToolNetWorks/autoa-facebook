@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from services import ai_provider
+from services.ai_provider import ProviderError
 from services.media_fingerprint import file_sha256, hamming_distance, perceptual_signature
 
 LOG = logging.getLogger("facebook-pipeline.media-analysis")
@@ -35,6 +36,13 @@ RISK_STATUS = {"none": STATUS_PASS, "low": STATUS_PASS, "medium": STATUS_NEEDS_R
 RISK_CATEGORY = {"violence", "blood", "sexual", "harassment", "dangerous", "misleading"}
 
 
+def _error_text(error: Exception) -> str:
+    """Một mô tả lỗi ngắn, không lộ chi tiết nội bộ ra giao diện."""
+    if isinstance(error, ProviderError):
+        return "ProviderError"
+    return type(error).__name__
+
+
 def analyze_image(path: Path, provider_config=None, known_media: list[dict] | None = None) -> dict:
     """Describe the image, judge the risk and look for duplicates."""
     provider_config = provider_config or ai_provider.load_config()
@@ -48,7 +56,7 @@ def analyze_image(path: Path, provider_config=None, known_media: list[dict] | No
         result["sha256"] = file_sha256(path)
         result["signature"] = perceptual_signature(path)
     except OSError as error:
-        result["error"] = type(error).__name__
+        result["error"] = _error_text(error)
         return result
 
     # a picture that is already in the album is a duplicate
@@ -72,8 +80,10 @@ def analyze_image(path: Path, provider_config=None, known_media: list[dict] | No
         answer = ai_provider.vision_json(
             "Bạn phân tích ảnh để chuẩn bị bài đăng Facebook.", ANALYSIS_PROMPT, [path], provider_config)
     except Exception as error:
+        # Không có kết luận nào: ảnh này chưa được kiểm tra, không phải là
+        # an toàn và cũng không phải là vi phạm.
         result["status"] = STATUS_UNKNOWN
-        result["error"] = type(error).__name__
+        result["error"] = _error_text(error)
         result["checked"] = True
         return result
 

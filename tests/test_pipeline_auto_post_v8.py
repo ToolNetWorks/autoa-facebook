@@ -8,6 +8,7 @@ import pytest
 from test_app import AuthClient, client  # noqa: F401 (registers the client fixture)
 
 import app as m
+from screening_fixtures import verify_pair
 from services import duplicate_guard, posting_limits, post_scheduler
 
 
@@ -34,8 +35,8 @@ def make_group(admin, pipeline_id, account_id, label, url, screening='priority',
         'pipeline_id': pipeline_id, 'account_id': account_id, 'label': label, 'url': url,
         'approved_target': approved, 'posting_mode': mode, 'nickname': payload_nickname}).json()
     with m.db() as conn:
-        conn.execute("UPDATE groups SET screening_status=?, nickname=? WHERE id=?",
-                     (screening, nickname, group['id']))
+        conn.execute("UPDATE groups SET nickname=? WHERE id=?", (nickname, group['id']))
+        verify_pair(conn, pipeline_id, account_id, group['id'], status=screening)
     return group['id']
 
 
