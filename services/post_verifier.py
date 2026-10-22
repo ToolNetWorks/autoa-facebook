@@ -10,6 +10,7 @@ Không bao giờ kết luận thành công chỉ vì đã nhấn nút. Các kế
 """
 from __future__ import annotations
 
+import logging
 from playwright.async_api import Page
 
 #: Thông báo Facebook khi bài đã đăng công khai.
@@ -35,6 +36,7 @@ REJECTED_NOTICES = (
     "text=Bài viết của bạn đã bị từ chối",
 )
 
+_LOGGER = logging.getLogger(__name__)
 
 async def _first_notice_visible(page: Page, notices: tuple[str, ...]) -> bool:
     for selector in notices:
@@ -45,7 +47,6 @@ async def _first_notice_visible(page: Page, notices: tuple[str, ...]) -> bool:
         except Exception:
             continue
     return False
-
 
 async def wait_post_outcome(page: Page, body: str = "") -> dict:
     """Quan sát kết quả thật sau khi bấm Đăng.
@@ -86,39 +87,41 @@ async def wait_post_outcome(page: Page, body: str = "") -> dict:
 async def newest_permalink(page: Page, body: str = "") -> str:
     """Liên kết của bài vừa viết, khi trang hiển thị nó.
 
-    Chỉ tìm liên kết trong ngữ cảnh Group (article, feed, timeline).
+    Chỉ tìm liên kết trong ngữ cảnh Group (feed, timeline, articles).
     Không lấy liên kết từ profile cá nhân, sidebar, header, v.v.
+    Nếu không tìm thấy link khớp nội dung trong Group, trả về rỗng.
     """
     try:
-        return await page.evaluate("""(body) => {
-            const links = [...document.querySelectorAll('a[href]')];
+        result = await page.evaluate("""(body) => {
+            const wanted = (body || '').trim();
+            if (!wanted) return '';
+            
+            // Chỉ tìm trong vùng nội dung chính của Group (feed, timeline)
+            const mainContent = document.querySelector('[role="main"], [data-pagelet="FeedUnit_0"], [role="feed"], div[data-pagelet^="FeedUnit"]');
+            if (!mainContent) return '';
+            
+            const linksInScope = [...mainContent.querySelectorAll('a[href]')];
             const post = (link) => {
                 const href = link.getAttribute('href') || '';
                 if (!href.includes('/posts/') && !href.includes('/permalink/')) return '';
                 return href.startsWith('http') ? href : new URL(href, location.origin).href;
             };
-            const wanted = (body || '').trim();
-            // Chỉ tìm trong vùng nội dung chính của Group (feed, timeline)
-            const mainContent = document.querySelector('[role="main"], [data-pagelet="FeedUnit_0"], [role="feed"], div[data-pagelet^="FeedUnit"]');
-            const searchScope = mainContent || document.body;
-            const linksInScope = [...searchScope.querySelectorAll('a[href]')];
             
-            const wanted = (body || '').trim();
-            if (wanted) {
-                for (const link of linksInScope) {
-                    const href = post(link);
-                    if (!href) continue;
-                    const holder = link.closest('div[data-testid="post_message"], div[role="article"], article, [data-pagelet^="FeedUnit"]') || link.parentElement;
-                    const text = holder ? (holder.innerText || '') : '';
-                    if (text.includes(wanted.slice(0, 40))) return href;
+            // Tìm link khớp nội dung caption (ưu tiên bài mới - thường ở đầu)
+            for (const link of [...linksInScope].reverse()) {
+                const href = post(link);
+                if (!href) continue;
+                const holder = link.closest('[data-testid="post_message"], [role="article"], article, [data-pagelet^="FeedUnit"]') || link.parentElement;
+                if (!holder) continue;
+                const text = holder.innerText || '';
+                if (text.includes(wanted.slice(0, 80))) {
+                    return href;
                 }
             }
-            // Fallback: first post link in scope
-            for (const link of linksInScope) {
-                const href = post(link);
-                if (href) return href;
-            }
+            // Không tìm thấy bài khớp nội dung -> trả rỗng (KHÔNG fallback)
             return '';
         }""", body)
-    except Exception:
+    except Exception as e:
+        _LOGGER.warning("newest_permalink failed: %s", e)
         return ""
+    return result

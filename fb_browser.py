@@ -1456,41 +1456,6 @@ async def wait_post_outcome(page, body: str = "") -> dict:
     return outcome
 
 
-async def newest_permalink(page, body: str = "") -> str:
-    """The link of the post that was just written, when the page shows it.
-
-    The link is a bonus: when it cannot be found the posting result stays
-    exactly as it was. When the text of the post is known, only a link next to
-    that text counts, so a pinned or older post is never mistaken for it.
-    """
-    try:
-        return await page.evaluate("""(body) => {
-            const links = [...document.querySelectorAll('a[href]')];
-            const post = (link) => {
-                const href = link.getAttribute('href') || '';
-                if (!href.includes('/posts/') && !href.includes('/permalink/')) return '';
-                return href.startsWith('http') ? href : new URL(href, location.origin).href;
-            };
-            const wanted = (body || '').trim();
-            if (wanted) {
-                for (const link of links) {
-                    const href = post(link);
-                    if (!href) continue;
-                    const holder = link.closest('div[data-testid="post_message"], div[role="article"], article') || link.parentElement;
-                    const text = holder ? (holder.innerText || '') : '';
-                    if (text.includes(wanted.slice(0, 40))) return href;
-                }
-            }
-            for (const link of links) {
-                const href = post(link);
-                if (href) return href;
-            }
-            return '';
-        }""", body)
-    except Exception:
-        return ""
-
-
 async def attempt_engagement(data: dict):
     """Read the public counters of a published post.
 
