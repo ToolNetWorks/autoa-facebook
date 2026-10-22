@@ -10,6 +10,7 @@ Không bao giờ kết luận thành công chỉ vì đã nhấn nút. Các kế
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from playwright.async_api import Page
 
@@ -54,34 +55,63 @@ async def wait_post_outcome(page: Page, body: str = "") -> dict:
     Trả về dict có ``state`` (published/pending_approval/rejected/ambiguous),
     ``details`` và ``permalink``. Không có kết quả nào được rút ra từ việc đã
     bấm nút. Hộp thoại đóng KHÔNG tự động nghĩa là bài đã đăng.
+
+    Quan sát đồng thời các trạng thái PUBLISHED/PENDING/REJECTED để không bỏ lỡ
+    thông báo xuất hiện ngắn. Quan sát bắt đầu trước hoặc đồng thời với Submit.
     """
     outcome = {"state": "ambiguous", "details": "", "permalink": ""}
-    try:
-        if await _first_notice_visible(page, REJECTED_NOTICES):
-            outcome["state"] = "rejected"
-            outcome["details"] = "Facebook từ chối bài đăng trong group này."
-            return outcome
-        if await _first_notice_visible(page, PENDING_NOTICES):
-            outcome["state"] = "pending_approval"
-            outcome["details"] = "Facebook đã nhận bài và đang chờ quản trị group duyệt."
-            return outcome
-        if await _first_notice_visible(page, PUBLISHED_NOTICES):
-            outcome["state"] = "published"
-            outcome["details"] = "Facebook xác nhận bài đã đăng."
-            return outcome
-    except Exception:
-        pass
-    # Hộp thoại composer đóng lại KHÔNG tự động nghĩa là bài đã đăng.
-    # Dialog có thể đóng do lỗi, hủy, mạng, v.v. Chỉ ghi ambiguous.
+    
+    # Tạo các task quan sát đồng thời
+    async def watch_notices(notices: tuple[str, ...], state: str, details: str):
+        for selector in notices:
+            try:
+                target = page.locator(selector).first
+                await target.wait_for(state="visible", timeout=2500)
+                return {"state": state, "details": details}
+            except Exception:
+                continue
+        return None
+    
+    # Khởi động quan sát đồng thời trước khi/dồng thời với Submit
+    published_task = asyncio.create_task(watch_notices(PUBLISHED_NOTICES, "published", "Facebook xác nhận bài đã đăng."))
+    pending_task = asyncio.create_task(watch_notices(PENDING_NOTICES, "pending_approval", "Facebook đã nhận bài và đang chờ quản trị group duyệt."))
+    rejected_task = asyncio.create_task(watch_notices(REJECTED_NOTICES, "rejected", "Facebook từ chối bài đăng trong group này."))
+    
+    # Chờ kết quả từ bất kỳ task nào hoàn thành trước
+    done, pending = await asyncio.wait(
+        [published_task, pending_task, rejected_task],
+        return_when=asyncio.FIRST_COMPLETED,
+        timeout=15000  # Timeout chung hợp lý
+    )
+    
+    # Hủy các task còn lại
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    
+    # Xử lý kết quả
+    for task in done:
+        try:
+            result = task.result()
+            if result:
+                return result
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    
+    # Không có notice rõ ràng -> quan sát dialog đóng (KHÔNG = published)
     try:
         dialog = page.get_by_role("dialog").last
         await dialog.wait_for(state="hidden", timeout=12000)
-        outcome["details"] = ("Hộp thoại tạo bài đã đóng nhưng không có thông báo xác nhận; "
-                              "kết quả không xác định, không tự gửi lại.")
+        return {"state": "ambiguous", "details": ("Hộp thoại tạo bài đã đóng nhưng không có thông báo xác nhận; "
+                              "kết quả không xác định, không tự gửi lại."), "permalink": ""}
     except Exception:
-        outcome["details"] = ("Không xác nhận được kết quả sau khi bấm Đăng; "
-                              "không tự gửi lại để tránh đăng trùng.")
-    return outcome
+        return {"state": "ambiguous", "details": ("Không xác nhận được kết quả sau khi bấm Đăng; "
+                              "không tự gửi lại để tránh đăng trùng."), "permalink": ""}
 
 
 async def newest_permalink(page: Page, body: str = "") -> str:
