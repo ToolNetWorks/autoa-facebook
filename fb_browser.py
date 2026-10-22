@@ -980,7 +980,7 @@ async def attempt_post(data: dict):
 
             # Chỉ retry lỗi mạng tạm thời khi điều hướng; không bao giờ
             # retry sau khi đã nhấn nút Đăng (để tránh đăng trùng).
-            run_with_bounded_retry(go_to_group, policy=RetryPolicy(),
+            await run_with_bounded_retry(go_to_group, policy=RetryPolicy(),
                                    stop_fn=lambda: False)
             await page.wait_for_timeout(5000)
             if any(part in page.url for part in ("/login", "/checkpoint", "/two_step_verification")):
@@ -1443,12 +1443,13 @@ async def wait_post_outcome(page, body: str = "") -> dict:
             return outcome
     except Exception:
         pass
-    # Hộp thoại composer đóng lại là dấu hiệu Facebook đã nhận bài.
+    # Hộp thoại composer đóng lại KHÔNG tự động nghĩa là bài đã đăng.
+    # Dialog có thể đóng do lỗi, hủy, mạng, v.v. Chỉ ghi ambiguous.
     try:
         dialog = page.get_by_role("dialog").last
         await dialog.wait_for(state="hidden", timeout=12000)
-        outcome["state"] = "published"
-        outcome["details"] = "Hộp thoại tạo bài đã đóng, Facebook đã nhận bài."
+        outcome["details"] = ("Hộp thoại tạo bài đã đóng nhưng không có thông báo xác nhận; "
+                              "kết quả không xác định, không tự gửi lại.")
     except Exception:
         outcome["details"] = ("Không xác nhận được kết quả sau khi bấm Đăng; "
                               "không tự gửi lại để tránh đăng trùng.")

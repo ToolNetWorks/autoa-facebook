@@ -6,6 +6,7 @@ xác minh kết quả cũng không được thử lại, để tránh đăng tr�
 """
 from __future__ import annotations
 
+import asyncio
 import random
 from dataclasses import dataclass
 from typing import Callable
@@ -88,7 +89,7 @@ def retry_delay_seconds(policy: RetryPolicy, retry_number: int,
     return min(policy.max_delay_seconds, base + (policy.jitter_seconds * jitter_source))
 
 
-def run_with_bounded_retry(operation, *, policy: RetryPolicy | None = None,
+async def run_with_bounded_retry(operation, *, policy: RetryPolicy | None = None,
                            stop_fn: Callable[[], bool] | None = None,
                            sleep_fn: Callable[[float], None] | None = None,
                            random_fn: Callable[[], float] | None = None,
@@ -102,14 +103,17 @@ def run_with_bounded_retry(operation, *, policy: RetryPolicy | None = None,
     """
     active_policy = policy or RetryPolicy()
     attempts = max(1, active_policy.max_attempts)
-    sleep_fn = sleep_fn or __import__("time").sleep
+    sleep_fn = sleep_fn or asyncio.sleep
     random_fn = random_fn or random.random
 
     for attempt in range(1, attempts + 1):
         if stop_fn is not None and stop_fn():
             raise InterruptedError("Đã dừng theo yêu cầu người dùng")
         try:
-            return operation()
+            result = operation()
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result
         except Exception as error:
             error_class = classify_error(error)
             if should_retry is not None:
@@ -124,6 +128,6 @@ def run_with_bounded_retry(operation, *, policy: RetryPolicy | None = None,
                 on_retry(attempt + 1, error_class, delay)
             if stop_fn is not None and stop_fn():
                 raise InterruptedError("Đã dừng theo yêu cầu người dùng") from error
-            sleep_fn(delay)
+            await sleep_fn(delay)
 
     raise RuntimeError("Vòng lặp retry kết thúc ngoài dự kiến")

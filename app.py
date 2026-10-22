@@ -2673,7 +2673,7 @@ def connect_account(account_id: int, principal: Principal = Depends(require_prin
         with log_file.open("ab") as handle:
             proc = subprocess.Popen([sys.executable, str(ROOT / "fb_browser.py"), "login", str(account_id)],
                                     cwd=str(ROOT), stdout=handle, stderr=subprocess.STDOUT,
-                                    start_new_session=True, env={**os.environ, "DATA_DIR": str(DATA)})
+                                    start_new_session=True, env={**os.environ, "DATA_DIR": str(DATA), "DISPLAY": ":99"})
         conn.execute("UPDATE accounts SET login_pid=? WHERE id=?", (proc.pid, account_id))
     audit("account", account_id, "Launched local browser for manual Facebook login")
     return {"ok": True, "pid": proc.pid, "message": "Open SSH-forwarded noVNC to log in; then close login window"}
@@ -2732,7 +2732,7 @@ def check_account(account_id: int, principal: Principal = Depends(require_princi
     try:
         proc = subprocess.run(
             [sys.executable, str(ROOT / "fb_browser.py"), "check", str(payload_file), str(result_file)],
-            cwd=ROOT, env={**os.environ, "DATA_DIR": str(DATA)},
+            cwd=ROOT, env={**os.environ, "DATA_DIR": str(DATA), "DISPLAY": ":99"},
             capture_output=True, text=True, timeout=180)
         if result_file.exists():
             outcome = json.loads(result_file.read_text(encoding="utf-8"))
@@ -4899,7 +4899,7 @@ def run_group_probe(account_id: int, url: str, nickname: str) -> dict:
     try:
         proc = subprocess.run(
             [sys.executable, str(ROOT / "fb_browser.py"), "check-group", str(payload_file), str(result_file)],
-            cwd=ROOT, env={**os.environ, "DATA_DIR": str(DATA)},
+            cwd=ROOT, env={**os.environ, "DATA_DIR": str(DATA), "DISPLAY": ":99"},
             capture_output=True, text=True, timeout=210)
         if result_file.exists():
             outcome = json.loads(result_file.read_text(encoding="utf-8"))
@@ -4962,7 +4962,7 @@ def check_pipeline_group(pipeline_id: int, group_id: int, principal: Principal =
     try:
         proc = subprocess.run(
             [sys.executable, str(ROOT / "fb_browser.py"), "check-group", str(payload_file), str(result_file)],
-            cwd=ROOT, env={**os.environ, "DATA_DIR": str(DATA)},
+            cwd=ROOT, env={**os.environ, "DATA_DIR": str(DATA), "DISPLAY": ":99"},
             capture_output=True, text=True, timeout=210)
         if result_file.exists():
             outcome = json.loads(result_file.read_text(encoding="utf-8"))
@@ -5564,7 +5564,7 @@ def execute_job(job: dict):
     result = {"state": "needs_review", "details": "Worker result unavailable; check Facebook before retrying", "evidence": ""}
     try:
         proc = subprocess.run([sys.executable, str(ROOT / "fb_browser.py"), "post", str(payload_file), str(result_file)],
-                              cwd=ROOT, env={**os.environ, "DATA_DIR": str(DATA)},
+                              cwd=ROOT, env={**os.environ, "DATA_DIR": str(DATA), "DISPLAY": ":99"},
                               capture_output=True, text=True, timeout=210)
         if result_file.exists():
             result = json.loads(result_file.read_text(encoding="utf-8"))
@@ -5692,7 +5692,7 @@ def execute_reel(task: dict):
     result={"state":"needs_review","details":"Worker result unavailable; verify profile before retrying","evidence":""}
     try:
         proc=subprocess.run([sys.executable,str(ROOT / "fb_browser.py"),"reel",str(payload_file),str(result_file)],
-            cwd=ROOT,env={**os.environ,"DATA_DIR":str(DATA)},capture_output=True,text=True,timeout=240)
+            cwd=ROOT,env={**os.environ,"DATA_DIR":str(DATA),"DISPLAY":":99"},capture_output=True,text=True,timeout=240)
         if result_file.exists():
             result=json.loads(result_file.read_text(encoding="utf-8"))
         else:
