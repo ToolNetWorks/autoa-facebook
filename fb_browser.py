@@ -15,14 +15,27 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 from profile_lock import ProfileBusy, ProfileLock
+from services import group_links
+from services.browser_session import atomic_storage_state
+from services.composer_detector import (find_composer, find_editor, find_media_button,
+                                        find_publish_button)
 from services.engagement_collector import counters_from_text
+from services.logging import (JsonlEventLogger, default_log_dir, new_run_id)
+from services.media_upload import upload_media
+from services.post_verifier import newest_permalink, wait_post_outcome
+from services.posting_mode import (enforce_posting_identity, require_anonymous_mode,
+                                   require_nickname_identity)
+from services.retry_policy import (AmbiguousPublishStateError, RetryPolicy,
+                                   classify_error, run_with_bounded_retry)
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.getenv("DATA_DIR", str(ROOT / "data"))).resolve()
 PROFILE_DIR = DATA / "profiles"
 EVIDENCE_DIR = DATA / "evidence"
+SESSIONS_DIR = DATA / "sessions"
 PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 async def context_for(playwright, account_id: int):
@@ -46,19 +59,45 @@ async def context_for(playwright, account_id: int):
         lock.release()
         raise
     context.fpm_profile_lock = lock
+    context.fpm_storage_destination = DATA / "sessions" / f"account-{account_id}.json"
     return context
 
 
 async def close_context(context):
-    """Close a Chromium context and release the profile lock it holds."""
+    """Close a Chromium context and release the profile lock it holds.
+
+    Trước khi đóng, lưu trạng thái trình duyệt (cookie, localStorage) ra
+    tệp hồ sơ theo cách nguyên atomic: ghi tệp tạm rồi ``os.replace``, để
+    không bao giờ để lại tệp session bị hỏng khi tiến trình bị gián đoạn.
+    """
     if context is None:
         return
     lock = getattr(context, "fpm_profile_lock", None)
+    destination = getattr(context, "fpm_storage_destination", None)
     try:
-        await context.close()
+        pages = context.pages
+        if pages and destination is not None:
+            try:
+                await pages[0].goto("https://www.facebook.com/",
+                                    wait_until="domcontentloaded",
+                                    timeout=30000)
+            except Exception:
+                # Cookie đã được thiết lập trong bộ nhớ; trang lỗi không
+                # được làm mất chúng.
+                pass
+            await atomic_storage_state(context, destination)
+    except Exception:
+        pass
     finally:
+        try:
+            await context.close()
+        except Exception:
+            pass
         if lock is not None:
-            lock.release()
+            try:
+                lock.release()
+            except Exception:
+                pass
 
 
 async def import_cookie_session(account_id: int, cookies: list[dict]) -> None:
@@ -368,8 +407,25 @@ async def require_anonymous_mode(page) -> bool:
 #: Nhãn của nút thêm ảnh. Dấu "/" không dùng được trong biểu thức chọn
 #: của Playwright, nên nhãn tiếng Việt được tra bằng bộ chọn thuộc tính.
 PHOTO_BUTTON_LABELS = ("Ảnh/video", "Ảnh / Video", "Photo/video", "Photos/videos", "Ảnh")
-#: Nut dang bai. Khong chua dau "/" nen dung duoc trong bieu thuc chon.
-SUBMIT_BUTTON_RE = re.compile(r"^(Post|Đăng|Đăng bài)$", re.I)
+
+#: Nút đăng bài. Facebook dùng cả thẻ ``button`` lẫn ``div`` có
+#: ``role="button"``, nhãn nằm trong một ``span`` đơn giản, và khi đăng ẩn danh
+#: nút lại là **Gửi** chứ không phải **Đăng**. Các lựa chọn đặt từ cụ thể nhất
+#: đến rộng nhất.
+SUBMIT_BUTTON_RE = re.compile(r"^(Post|Đăng|Đăng bài|Gửi|Send)$", re.I)
+SUBMIT_BUTTON_SELECTORS = (
+    "span:text-is('Đăng')",
+    "span:text-is('Post')",
+    "span:text-is('Gửi')",
+    "span:text-is('Send')",
+    "span:text-is('Đăng bài')",
+    "div[aria-label='Đăng']",
+    "div[aria-label='Post']",
+    "div[aria-label='Gửi']",
+    "div[aria-label='Send']",
+    "div[role='button']:has-text('Đăng')",
+    "div[role='button']:has-text('Post')",
+)
 PHOTO_BUTTON_RE = re.compile(r"^(Photo|Photos)", re.I)
 #: Nút tải ảnh lên máy, một số giao diện dùng nhãn này thay cho nút trên.
 PHOTO_UPLOAD_RE = re.compile(
@@ -533,6 +589,11 @@ async def check_group(data: dict) -> dict:
     of the opposite, and ``None`` when there was not enough to tell. A missing
     selector, a timeout or a browser error is never a sign that Facebook
     restricts the account.
+
+    Chưa tham gia group không mặc định nghĩa không được đăng: một số group
+    công khai cho phépVisitor Posting (viết trên tường group mà không phải
+    thành viên). Nếu thấy nút tham gia nhưng vẫn tìm thấy ô soạn bài, hệ thống
+    coi như có thể đăng (visitor posting), chứ không chặn ngay lập tức.
     """
     account_id = int(data["account_id"])
     url = str(data["group_url"])
@@ -542,12 +603,19 @@ async def check_group(data: dict) -> dict:
         "can_post": None, "supports_anonymous": None, "supports_nickname": None,
         "nickname_available": None, "requires_approval": False, "group_name": "",
         "resolved_url": "", "details": "", "evidence": "",
+        "visitor_posting": None,
     }
     try:
         async with async_playwright() as playwright:
             context = await context_for(playwright, account_id)
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
+                # Chuẩn hóa URL group trước khi mở.
+                try:
+                    canonical_url, _ = group_links.normalize_group_url(url)
+                    url = canonical_url
+                except Exception:
+                    pass
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=65000)
                 except Exception:
@@ -608,8 +676,23 @@ async def check_group(data: dict) -> dict:
                     page.get_by_role("button", name=GROUP_COMPOSER_RE),
                 ], timeout=1500)
                 if join is not None:
+                    # Có nút tham gia: chưa chắc là không được đăng. Một số group
+                    # công khai hỗ trợ Visitor Posting, cho phép viết bài ngay
+                    # trên tường group trước khi tham gia. Chỉ chặn khi composer
+                    # cũng không có sẵn.
+                    if composer is not None:
+                        outcome["visitor_posting"] = True
+                        outcome["is_member"] = False
+                        outcome["can_post"] = True
+                        outcome["status"] = "ok"
+                        outcome["details"] = ("Chưa tham gia group nhưng ô soạn bài có sẵn: "
+                                              "Facebook cho phép viết bài công khai (Visitor Posting).")
+                        # Không mở composer ở đây để không thay đổi trạng thái;
+                        # kiểm tra chế độ đăng sẽ được thực hiện khi đăng thật.
+                        return outcome
                     outcome.update(status="not_member", is_member=False, can_post=None,
-                                   details="Tài khoản chưa tham gia group này.")
+                                   details="Tài khoản chưa tham gia group này và không thấy ô soạn bài; "
+                                           "không thể đăng mà không tham gia.")
                     return outcome
                 if composer is None:
                     # Không tìm thấy ô soạn bài không có nghĩa là bị hạn chế:
@@ -874,19 +957,44 @@ async def attempt_post(data: dict):
     evidence_name = f"job-{job_id}.png"
     evidence_path = EVIDENCE_DIR / evidence_name
     was_clicked = False
+    run_id = new_run_id()
+    logger = JsonlEventLogger(default_log_dir(DATA) / "posting.jsonl", run_id=run_id)
     context = None
     try:
+        logger.emit("post_started", job_id=job_id, account_id=account_id,
+                    group_url=expected, run_id=run_id)
         async with async_playwright() as playwright:
             context = await context_for(playwright, account_id)
             page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto(expected, wait_until="domcontentloaded", timeout=65000)
+
+            # Chuẩn hóa URL group trước khi mở, tránh đăng nhầm group vì
+            # tham số truy vết hay viết tắt khác nhau trỏ cùng một group.
+            try:
+                canonical_url, _ = group_links.normalize_group_url(expected)
+                expected = canonical_url
+            except Exception:
+                pass
+
+            def go_to_group():
+                return page.goto(expected, wait_until="domcontentloaded", timeout=65000)
+
+            # Chỉ retry lỗi mạng tạm thời khi điều hướng; không bao giờ
+            # retry sau khi đã nhấn nút Đăng (để tránh đăng trùng).
+            run_with_bounded_retry(go_to_group, policy=RetryPolicy(),
+                                   stop_fn=lambda: False)
             await page.wait_for_timeout(5000)
             if any(part in page.url for part in ("/login", "/checkpoint", "/two_step_verification")):
+                logger.emit("post_failed", job_id=job_id, reason="login_or_checkpoint",
+                            run_id=run_id)
                 return result("failed", "Login or checkpoint required; open login browser and handle manually")
             if "/groups/" not in page.url:
+                logger.emit("post_failed", job_id=job_id, reason="unexpected_destination",
+                            run_id=run_id)
                 return result("failed", "Unexpected destination; refusing to post")
             body_text = (await page.locator("body").inner_text(timeout=10000))[:6500]
             if any(s in body_text for s in ("Join Group", "Tham gia nhóm")) and not any(s in body_text for s in ("Write something", "Bạn viết gì", "Viết gì")):
+                logger.emit("post_failed", job_id=job_id, reason="not_member_or_no_composer",
+                            run_id=run_id)
                 return result("failed", "Not a member or group permissions prevent posting")
 
             mode = str(data.get("posting_mode") or "anonymous").lower()
@@ -895,19 +1003,29 @@ async def attempt_post(data: dict):
                 return result("needs_review", f"Unknown posting mode '{mode}'; no post submitted")
             if not data.get("media"):
                 return result("failed", "Group posts must contain an image")
+            await dismiss_common_popups(page)
             compose = await first_visible(page, [
                 page.get_by_text(re.compile(r"Write something|Viết gì đó|Bạn viết gì|Hãy viết gì đó", re.I)),
                 page.get_by_role("button", name=re.compile(r"Write something|Viết gì đó|Bạn viết gì", re.I)),
+                page.locator("div[role='button']:has-text('Bạn viết gì đi')"),
+                page.locator("div[role='button']:has-text('Bạn đang nghĩ gì')"),
+                page.locator("div[aria-label='Tạo bài viết']"),
             ])
             if compose is None:
+                logger.emit("post_failed", job_id=job_id, reason="composer_not_found",
+                            run_id=run_id)
                 return result("failed", "Composer not found. Facebook interface may have changed; no post submitted")
             if not await click_element(compose, timeout=10000):
+                logger.emit("post_failed", job_id=job_id, reason="composer_not_clickable",
+                            run_id=run_id)
                 return result("failed", "Không mở được ô soạn bài; không đăng bài")
             await page.wait_for_timeout(1500)
             actual_identity, verification, identity_error = await enforce_posting_identity(
                 page, mode, nickname)
             if identity_error:
                 await page.screenshot(path=str(evidence_path), full_page=False, timeout=10000)
+                logger.emit("post_needs_review", job_id=job_id, reason=identity_error,
+                            run_id=run_id)
                 return result("needs_review", identity_error, evidence_name, "", verification)
             dialog = await active_composer_dialog(page)
             editor = await first_visible(page, [
@@ -916,54 +1034,44 @@ async def attempt_post(data: dict):
                 page.locator('[contenteditable="true"][role="textbox"]'),
             ])
             if editor is None:
+                logger.emit("post_failed", job_id=job_id, reason="editor_not_found",
+                            run_id=run_id)
                 return result("failed", "Text editor unavailable; no post submitted")
             await editor.fill(str(data["body"]), timeout=15000)
 
             media = list(data.get("media") or [])
             if media:
-                photo_button = await first_visible(page, [
-                    *[dialog.locator(f'[aria-label="{label}"]') for label in PHOTO_BUTTON_LABELS],
-                    *[page.locator(f'[aria-label="{label}"]') for label in PHOTO_BUTTON_LABELS],
-                    dialog.get_by_role("button", name=PHOTO_BUTTON_RE),
-                    page.get_by_role("button", name=PHOTO_BUTTON_RE),
-                ])
-                if photo_button is None:
+                # Fallback upload: thử nhiều chiến lược, không ép khi giao diện đổi.
+                uploaded = await upload_media(page, media,
+                                              dialog_selector="div[role='dialog']")
+                if not uploaded:
+                    logger.emit("post_failed", job_id=job_id, reason="media_upload_failed",
+                                run_id=run_id)
                     return result("failed", "Media upload control not found; no post submitted")
-                chooser = None
-                try:
-                    async with page.expect_file_chooser(timeout=15000) as chooser_info:
-                        if not await click_element(photo_button, timeout=8000):
-                            return result("failed", "Không bấm được nút thêm ảnh; không đăng bài")
-                    chooser = await chooser_info.value
-                except Exception:
-                    # Một số giao diện mở hộp chọn ảnh thay vì hộp chọn tệp.
-                    upload = await first_visible(page, [
-                        dialog.get_by_role("button", name=PHOTO_UPLOAD_RE),
-                        page.get_by_role("button", name=PHOTO_UPLOAD_RE),
-                    ], timeout=3000)
-                    if upload is None:
-                        return result("failed", "Không mở được hộp chọn ảnh; không đăng bài")
-                    try:
-                        async with page.expect_file_chooser(timeout=15000) as chooser_info:
-                            if not await click_element(upload, timeout=8000):
-                                return result("failed", "Không mở được hộp chọn tệp; không đăng bài")
-                        chooser = await chooser_info.value
-                    except Exception:
-                        return result("failed", "Không mở được hộp chọn tệp; không đăng bài")
-                await chooser.set_files(media)
                 await page.wait_for_timeout(3000)
 
             # Require a visible publish button in the active post dialog.
             submit = await first_visible(page, [
                 dialog.get_by_role("button", name=SUBMIT_BUTTON_RE),
                 dialog.get_by_text(SUBMIT_BUTTON_RE),
+                *[dialog.locator(selector) for selector in SUBMIT_BUTTON_SELECTORS],
                 page.get_by_role("button", name=SUBMIT_BUTTON_RE),
                 page.get_by_text(SUBMIT_BUTTON_RE),
-            ], timeout=1500)
+                *[page.locator(selector) for selector in SUBMIT_BUTTON_SELECTORS],
+            ], timeout=2500)
             if submit is None:
-                return result("failed", "Publish control not found; no post submitted")
+                await page.screenshot(path=str(evidence_path), full_page=False, timeout=10000)
+                labels = await describe_composer(page)
+                logger.emit("post_failed", job_id=job_id, reason="submit_button_not_found",
+                            run_id=run_id)
+                return result("failed",
+                              "Không tìm thấy nút đăng trong ô soạn bài; không đăng bài"
+                              + (f" (có: {labels})" if labels else ""),
+                              evidence_name)
             if mode == "nickname":
                 if not await identity_shown(page, actual_identity):
+                    logger.emit("post_needs_review", job_id=job_id,
+                                reason="nickname_not_verified", run_id=run_id)
                     return result("needs_review",
                                   "Không xác minh được biệt danh trước khi gửi; không đăng bài",
                                   evidence_name, actual_identity, "not_verified")
@@ -972,25 +1080,57 @@ async def attempt_post(data: dict):
                 # kiểm tra danh tính lần cuối.
                 await dismiss_anonymous_notice(page)
                 if not await anonymous_mode_verified(page):
+                    logger.emit("post_needs_review", job_id=job_id,
+                                reason="anonymous_not_verified", run_id=run_id)
                     return result("needs_review",
                                   "Chế độ ẩn danh mất trước khi gửi; không đăng bài",
                                   evidence_name, actual_identity, "not_verified")
             if not await submit.is_enabled():
+                logger.emit("post_failed", job_id=job_id, reason="submit_disabled",
+                            run_id=run_id)
                 return result("failed", "Publish control disabled; no post submitted")
             was_clicked = True
             if not await click_element(submit, timeout=15000):
+                logger.emit("post_failed", job_id=job_id, reason="submit_click_failed",
+                            run_id=run_id)
                 return result("failed", "Không bấm được nút đăng; không đăng bài")
-            await page.wait_for_timeout(5000)
-            permalink = await newest_permalink(page, str(data.get("body") or ""))
+            # Quan sát kết quả thật. Không có kết luận nào được rút ra từ
+            # việc đã bấm nút. Không tự retry sau khi nhấn Đăng.
+            outcome = await wait_post_outcome(page, str(data.get("body") or ""))
+            permalink = outcome["permalink"] or await newest_permalink(
+                page, str(data.get("body") or ""))
             await page.screenshot(path=str(evidence_path), full_page=False, timeout=15000)
-            # Meta may queue the post for moderation, reject it or publish it.
-            # Never report definitive success based just on a button click.
-            return result("submitted_unverified",
-                          f"Đã bấm đăng với danh tính '{actual_identity}'; hãy kiểm tra hàng đợi duyệt của group "
-                          "và danh tính hiển thị trên bài", evidence_name, actual_identity, verification,
-                          permalink)
+            if outcome["state"] == "published":
+                logger.emit("post_posted", job_id=job_id, identity=actual_identity,
+                            permalink=permalink, run_id=run_id)
+                return result("posted",
+                              "Facebook đã xác nhận bài đã đăng",
+                              evidence_name, actual_identity, "verified", permalink)
+            if outcome["state"] == "pending_approval":
+                logger.emit("post_pending_approval", job_id=job_id, identity=actual_identity,
+                            permalink=permalink, run_id=run_id)
+                return result("pending_approval",
+                              "Facebook đã nhận bài và đang chờ quản trị group duyệt",
+                              evidence_name, actual_identity, "verified", permalink)
+            if outcome["state"] == "rejected":
+                logger.emit("post_rejected", job_id=job_id, identity=actual_identity,
+                            permalink=permalink, run_id=run_id)
+                return result("failed",
+                              "Facebook từ chối bài đăng trong group này",
+                              evidence_name, actual_identity, "not_verified", permalink)
+            logger.emit("post_submitted_unverified", job_id=job_id, identity=actual_identity,
+                        permalink=permalink, run_id=run_id)
+            return result("submitted_unverified", outcome["details"], evidence_name,
+                          actual_identity, "not_verified", permalink)
+    except AmbiguousPublishStateError as error:
+        # Kết quả đăng chưa rõ: không retry, không coi là thành công.
+        logger.emit("post_ambiguous", job_id=job_id, reason=str(error), run_id=run_id)
+        return result("submitted_unverified", str(error)[:500], evidence_name)
     except Exception as error:
-        label = "needs_review"
+        error_class = classify_error(error)
+        logger.emit("post_exception", job_id=job_id, error_class=error_class,
+                    error=type(error).__name__, run_id=run_id)
+        label = "needs_review" if error_class == "publish_ambiguous" else "needs_review"
         if context:
             try:
                 pages = context.pages
@@ -1001,6 +1141,7 @@ async def attempt_post(data: dict):
         return result(label, f"Browser exception: {type(error).__name__}: {str(error)[:500]}",
                       evidence_name if evidence_path.is_file() else "")
     finally:
+        logger.close()
         if context:
             try:
                 await close_context(context)
@@ -1193,6 +1334,127 @@ def engagement_result(counters: dict, status: str, error_code: str = ""):
     return {"counters": counters, "verification_status": status, "error_code": error_code}
 
 
+async def dismiss_common_popups(page) -> bool:
+    """Đóng các hộp thoại phủ lên composer: cookie, quảng cáo, thông báo.
+
+    Hộp thoại này chắn thao tác chuột, khiến nút bấm bị báo lỗi dù đã tìm
+    thấy đúng phần tử.
+    """
+    candidates = [
+        "div[aria-label='Đóng']",
+        "div[aria-label='Close']",
+        "div[role='button']:has-text('Để sau')",
+        "div[role='button']:has-text('Not now')",
+        "div[role='button']:has-text('Bỏ qua')",
+        "div[role='button']:has-text('Skip')",
+    ]
+    closed = False
+    for selector in candidates:
+        try:
+            target = page.locator(selector).first
+            await target.wait_for(state="visible", timeout=400)
+            if await target.is_enabled():
+                if await click_element(target, timeout=1500):
+                    closed = True
+        except Exception:
+            continue
+    return closed
+
+
+#: Thông báo Facebook dùng khi bài đã đăng công khai.
+PUBLISHED_NOTICES = (
+    "text=Your post is now published",
+    "text=Bài viết của bạn hiện đã được đăng",
+    "text=Đã đăng bài viết của bạn",
+    "text=Post published",
+)
+#: Thông báo Facebook dùng khi bài đang chờ quản trị group duyệt.
+PENDING_NOTICES = (
+    "text=Sent for approval",
+    "text=Đã gửi để phê duyệt",
+    "text=Đang chờ quản trị viên duyệt",
+    "text=Đang chờ duyệt",
+    "text=Đã gửi để duyệt",
+)
+#: Thông báo Facebook dùng khi bài bị từ chối.
+REJECTED_NOTICES = (
+    "text=You can't post in this group",
+    "text=Bạn không thể đăng bài trong nhóm này",
+    "text=Your post was rejected",
+    "text=Bài viết của bạn đã bị từ chối",
+)
+
+
+async def _first_notice_visible(page, notices) -> bool:
+    for selector in notices:
+        try:
+            target = page.locator(selector).first
+            await target.wait_for(state="visible", timeout=2500)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def describe_composer(page) -> str:
+    """Mô tả ngắn các nút đang hiện trong composer, để đọc lỗi dễ hơn."""
+    try:
+        dialog = page.get_by_role("dialog").last
+        labels = []
+        for element in await dialog.locator("span, div[role='button']").all():
+            try:
+                text = (await element.inner_text()).strip()
+                if text and len(text) <= 40 and text not in labels:
+                    labels.append(text)
+            except Exception:
+                continue
+            if len(labels) >= 12:
+                break
+        return ", ".join(labels)[:400]
+    except Exception:
+        return ""
+
+
+async def wait_post_outcome(page, body: str = "") -> dict:
+    """Quan sát kết quả thật sau khi bấm Đăng.
+
+    Ba kết quả khác nhau, và không kết quả nào được rút ra từ việc đã bấm
+    nút:
+
+    * ``published`` — Facebook xác nhận bài đã đăng.
+    * ``pending_approval`` — Facebook xác nhận bài đang chờ quản trị group
+      duyệt.
+    * ``ambiguous`` — không xác nhận được. Bài này **không** được gửi lại,
+      vì có thể đã đăng rồi.
+    """
+    outcome = {"state": "ambiguous", "details": "", "permalink": ""}
+    try:
+        if await _first_notice_visible(page, REJECTED_NOTICES):
+            outcome["state"] = "rejected"
+            outcome["details"] = "Facebook từ chối bài đăng trong group này."
+            return outcome
+        if await _first_notice_visible(page, PENDING_NOTICES):
+            outcome["state"] = "pending_approval"
+            outcome["details"] = "Facebook đã nhận bài và đang chờ quản trị group duyệt."
+            return outcome
+        if await _first_notice_visible(page, PUBLISHED_NOTICES):
+            outcome["state"] = "published"
+            outcome["details"] = "Facebook xác nhận bài đã đăng."
+            return outcome
+    except Exception:
+        pass
+    # Hộp thoại composer đóng lại là dấu hiệu Facebook đã nhận bài.
+    try:
+        dialog = page.get_by_role("dialog").last
+        await dialog.wait_for(state="hidden", timeout=12000)
+        outcome["state"] = "published"
+        outcome["details"] = "Hộp thoại tạo bài đã đóng, Facebook đã nhận bài."
+    except Exception:
+        outcome["details"] = ("Không xác nhận được kết quả sau khi bấm Đăng; "
+                              "không tự gửi lại để tránh đăng trùng.")
+    return outcome
+
+
 async def newest_permalink(page, body: str = "") -> str:
     """The link of the post that was just written, when the page shows it.
 
@@ -1269,6 +1531,157 @@ async def attempt_engagement(data: dict):
                 pass
 
 
+async def _cli_check_composer(payload: dict) -> dict:
+    """Kiểm tra xem ô soạn bài có sẵn trên nhóm hay không (dùng cho CLI debug)."""
+    account_id = int(payload["account_id"])
+    url = str(payload["group_url"])
+    outcome = {"status": "unknown", "composer": False, "editor": False,
+               "publish": False, "media": False, "details": "", "url": url}
+    try:
+        async with async_playwright() as playwright:
+            context = await context_for(playwright, account_id)
+            try:
+                page = context.pages[0] if context.pages else await context.new_page()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=65000)
+                except Exception:
+                    outcome.update(status="error", details="Không mở được trang group")
+                    return outcome
+                await page.wait_for_timeout(4000)
+                if any(part in page.url for part in ("/login", "/checkpoint", "/two_step_verification")):
+                    outcome.update(status="checkpoint", details="Yêu cầu đăng nhập hoặc xác minh")
+                    return outcome
+                composer = await find_composer(page, timeout=3000)
+                outcome["composer"] = composer is not None
+                if composer is None:
+                    outcome.update(status="no_composer", details="Không tìm thấy ô soạn bài")
+                    return outcome
+                if await click_element(composer, timeout=10000):
+                    await page.wait_for_timeout(1500)
+                    dialog = await active_composer_dialog(page)
+                    editor = await find_editor(page, dialog, timeout=5000)
+                    outcome["editor"] = editor is not None
+                    publish = await find_publish_button(page, dialog, timeout=3000)
+                    outcome["publish"] = publish is not None
+                    media = await find_media_button(page, dialog, timeout=3000)
+                    outcome["media"] = media is not None
+                    try:
+                        await page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    outcome.update(status="ok", details="Ô soạn bài có sẵn")
+                else:
+                    outcome.update(status="composer_not_clickable", details="Không bấm được ô soạn bài")
+            finally:
+                await close_context(context)
+    except Exception as error:
+        outcome.update(status="error", details=f"Lỗi: {type(error).__name__}: {str(error)[:300]}")
+    return outcome
+
+
+async def _cli_check_identity(payload: dict) -> dict:
+    """Kiểm tra chế độ đăng ẩn danh / biệt danh có sẵn hay không (CLI debug)."""
+    account_id = int(payload["account_id"])
+    url = str(payload["group_url"])
+    mode = str(payload.get("posting_mode") or "anonymous").lower()
+    nickname = str(payload.get("nickname") or "").strip()
+    outcome = {"status": "unknown", "mode": mode, "available": False,
+               "details": "", "url": url}
+    try:
+        async with async_playwright() as playwright:
+            context = await context_for(playwright, account_id)
+            try:
+                page = context.pages[0] if context.pages else await context.new_page()
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=65000)
+                except Exception:
+                    outcome.update(status="error", details="Không mở được trang group")
+                    return outcome
+                await page.wait_for_timeout(4000)
+                if any(part in page.url for part in ("/login", "/checkpoint", "/two_step_verification")):
+                    outcome.update(status="checkpoint", details="Yêu cầu đăng nhập hoặc xác minh")
+                    return outcome
+                composer = await find_composer(page, timeout=3000)
+                if composer is None:
+                    outcome.update(status="no_composer", details="Không tìm thấy ô soạn bài")
+                    return outcome
+                if await click_element(composer, timeout=10000):
+                    await page.wait_for_timeout(1500)
+                    if mode == "anonymous":
+                        available = await require_anonymous_mode(page)
+                        outcome["available"] = available
+                        outcome["details"] = ("Chế độ ẩn danh có sẵn" if available
+                                              else "Chế độ ẩn danh không khả dụng")
+                    elif mode == "nickname":
+                        if not nickname:
+                            outcome.update(status="needs_nickname", details="Chưa cấu hình biệt danh")
+                        else:
+                            selected, names = await require_nickname_identity(page, nickname)
+                            outcome["available"] = bool(selected)
+                            outcome["details"] = (f"Đã chọn '{selected}'" if selected
+                                                  else f"Biệt danh không có sẵn ({', '.join(names[:3]) if names else 'không có'})")
+                        try:
+                            await page.keyboard.press("Escape")
+                        except Exception:
+                            pass
+                    else:
+                        outcome.update(status="unknown_mode", details=f"Chế độ không hợp lệ: {mode}")
+                    outcome.update(status="ok" if outcome["available"] else "unavailable")
+                else:
+                    outcome.update(status="composer_not_clickable", details="Không bấm được ô soạn bài")
+            finally:
+                await close_context(context)
+    except Exception as error:
+        outcome.update(status="error", details=f"Lỗi: {type(error).__name__}: {str(error)[:300]}")
+    return outcome
+
+
+def _cli_dry_run(payload: dict) -> dict:
+    """Xác thực yêu cầu đăng mà không thực sự đăng (CLI debug, Dry Run).
+
+    Không mở trình duyệt, không nhấn nút Đăng. Chỉ kiểm tra tính hợp lệ của
+    dữ liệu đầu vào.
+    """
+    errors = []
+    account_id = payload.get("account_id")
+    group_url = payload.get("group_url")
+    body = payload.get("body") or ""
+    media = payload.get("media") or []
+    mode = str(payload.get("posting_mode") or "anonymous").lower()
+    nickname = str(payload.get("nickname") or "").strip()
+
+    if not account_id:
+        errors.append("Thiếu account_id")
+    if not group_url:
+        errors.append("Thiếu group_url")
+    else:
+        try:
+            group_links.normalize_group_url(group_url)
+        except Exception as error:
+            errors.append(f"Group URL không hợp lệ: {error}")
+    if not body:
+        errors.append("Thiếu caption (body)")
+    if not media:
+        errors.append("Phải có ít nhất một tệp ảnh")
+    if mode not in ("anonymous", "nickname"):
+        errors.append(f"Chế độ đăng không hợp lệ: {mode}")
+    if mode == "nickname" and not nickname:
+        errors.append("Chế độ biệt danh cần tên biệt danh")
+
+    return {
+        "status": "ok" if not errors else "invalid",
+        "dry_run": True,
+        "account_id": account_id,
+        "group_url": group_url,
+        "mode": mode,
+        "nickname": nickname,
+        "media_count": len(media),
+        "errors": errors,
+        "details": "Dry Run: không nhấn nút Đăng, không đăng bài thật" if not errors
+        else "; ".join(errors),
+    }
+
+
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "login":
         asyncio.run(manual_login(int(sys.argv[2])))
@@ -1298,9 +1711,24 @@ def main():
         print(outcome.get("verification_status", "unavailable"))
         return
     if len(sys.argv) != 4 or sys.argv[1] not in ("post", "reel"):
-        print("Usage: fb_browser.py login <account_id> | check|check-group|post|reel|engagement <request.json> <result.json>", file=sys.stderr)
+        print("Usage: fb_browser.py login <account_id> | check|check-group|check-composer|check-identity|dry-run|post|reel|engagement <request.json> <result.json>", file=sys.stderr)
         raise SystemExit(2)
     payload = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+    if sys.argv[1] == "check-composer":
+        outcome = asyncio.run(_cli_check_composer(payload))
+        Path(sys.argv[3]).write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
+        print(outcome.get("status", "unknown"))
+        return
+    if sys.argv[1] == "check-identity":
+        outcome = asyncio.run(_cli_check_identity(payload))
+        Path(sys.argv[3]).write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
+        print(outcome.get("status", "unknown"))
+        return
+    if sys.argv[1] == "dry-run":
+        outcome = _cli_dry_run(payload)
+        Path(sys.argv[3]).write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
+        print(outcome.get("status", "unknown"))
+        return
     outcome = asyncio.run(attempt_post(payload) if sys.argv[1] == "post" else attempt_reel(payload))
     Path(sys.argv[3]).write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
     print(outcome["state"])

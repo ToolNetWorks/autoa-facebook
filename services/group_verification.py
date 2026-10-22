@@ -310,6 +310,26 @@ def pairs_of(conn, pipeline_id: int) -> dict:
     return result
 
 
+#: Lỗi kỹ thuật: có thể thử lại. Lỗi quyền hoặc phiên đăng nhập thì không.
+TRANSIENT_FAILURE_MARKERS = (
+    "timeout", "timed out", "quá thời gian", "không xác nhận được", "not found",
+    "không tìm thấy", "không bấm được", "không mở được", "không thấy",
+    "publish control", "browser", "exception", "không đọc được",
+)
+PERMANENT_FAILURE_MARKERS = (
+    "login", "checkpoint", "đăng nhập", "session", "phiên", "quyền", "permission",
+    "not a member", "bị hạn chế", "restricted", "từ chối", "rejected", "spam",
+)
+
+
+def is_transient_failure(details: str) -> bool:
+    """Lỗi kỹ thuật thì được thử lại, lỗi quyền hoặc phiên thì không."""
+    text = str(details or "").lower()
+    if any(marker in text for marker in PERMANENT_FAILURE_MARKERS):
+        return False
+    return any(marker in text for marker in TRANSIENT_FAILURE_MARKERS)
+
+
 def sync_from_job(conn, job_id: int) -> None:
     """Cập nhật bằng chứng xác minh từ kết quả thật của một lần gửi bài.
 

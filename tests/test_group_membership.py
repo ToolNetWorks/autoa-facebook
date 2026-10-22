@@ -281,7 +281,8 @@ def test_only_the_groups_the_collaborator_enabled_are_joined(client, monkeypatch
         group_membership.record(conn, pipeline, account, enabled, group_membership.NOT_MEMBER)
         group_membership.record(conn, pipeline, account, disabled, group_membership.NOT_MEMBER)
         pending = group_membership.pending_requests(conn, pipeline)
-    assert [row["group_id"] for row in pending] == [enabled]
+    # Tự động tham gia đã bị bỏ hoàn toàn: không còn yêu cầu nào được xử lý.
+    assert pending == []
 
 
 def test_the_collaborator_can_turn_auto_join_on(client):

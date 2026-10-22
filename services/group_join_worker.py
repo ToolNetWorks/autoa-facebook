@@ -111,24 +111,14 @@ def pending_requests(context: JoinContext, pipeline_id: int, limit: int = 5) -> 
 
 def join_worker(context: JoinContext, pipeline_ids: Callable[[], list[int]],
                 stop_event) -> None:
-    """Worker xử lý yêu cầu tham gia của các group CTV đã bật."""
+    """Worker tự động tham gia group — ĐÃ BỎ HOÀN TOÀN.
+
+    Theo yêu cầu mới nhất, hệ thống không tự động tham gia group, không tự
+    gửi yêu cầu tham gia và không tự trả lời câu hỏi group. Worker này giữ
+    lại cấu trúc để không làm hỏng vòng đời ứng dụng, nhưng không xử lý
+    yêu cầu nào.
+    """
     while not stop_event.is_set():
-        handled = 0
-        for pipeline_id in pipeline_ids():
-            if handled >= MAX_REQUESTS_PER_RUN:
-                break
-            try:
-                for row in pending_requests(context, pipeline_id):
-                    if handled >= MAX_REQUESTS_PER_RUN:
-                        break
-                    answers = _answers(row.get("join_answers_json"))
-                    outcome = run_join_in_browser(context, row["account_id"],
-                                                  row["group_url"], answers)
-                    record_outcome(context, pipeline_id, row["account_id"], row["group_id"],
-                                   outcome, answers)
-                    handled += 1
-            except Exception as error:  # noqa: BLE001 - worker không được chết
-                LOG.info("Group join worker: %s", type(error).__name__)
         stop_event.wait(60)
 
 

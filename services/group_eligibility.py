@@ -154,14 +154,22 @@ def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
         return _no(group_verification.NOT_TESTED, f"Chế độ đăng '{mode}' không hợp lệ.",
                     "Chọn lại chế độ đăng của group.", mode)
 
-    # 4. Tài khoản phải là thành viên của group. Nếu biết rõ là chưa vào
-    #    group thì không được đăng, và không được coi là chờ duyệt.
+    # 4. Tài khoản chưa tham gia không mặc định chặn đăng: một số group công
+    #    khai hỗ trợ Visitor Posting (viết bài trên tường group mà không phải
+    #    thành viên). Chỉ chặn khi bằng chứng rõ ràng là không thể đăng.
     membership = group_membership.status_of(conn, pipeline_id, account_id, group_id)
     if membership == group_membership.NOT_MEMBER:
-        return _no(group_verification.NOT_TESTED,
-                    "Tài khoản chưa tham gia group này.",
-                    "Tham gia group bằng tài khoản này rồi thử lại.", mode,
-                    decision=WAITING_MEMBERSHIP)
+        evidence = _observation(conn, account_id, group_id)
+        if evidence.get("can_post") is True:
+            # Visitor Posting được Facebook hỗ trợ: cho phép bài đầu tiên làm
+            # lần xác minh thực tế.
+            pass
+        else:
+            return _no(group_verification.NOT_TESTED,
+                        "Tài khoản chưa tham gia group này và chưa có bằng chứng "
+                        "Facebook cho phép viết bài mà không tham gia.",
+                        "Xác minh quyền đăng bằng bài đăng thật, hoặc tham gia group.",
+                        mode, decision=WAITING_MEMBERSHIP)
     if membership == group_membership.PENDING_APPROVAL:
         return _no(group_verification.NOT_TESTED,
                     "Yêu cầu tham gia group đang chờ group duyệt.",

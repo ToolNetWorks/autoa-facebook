@@ -199,27 +199,11 @@ def pairs_of(conn, pipeline_id: int) -> dict:
 
 
 def pending_requests(conn, pipeline_id: int, limit: int = 5) -> list[dict]:
-    """Các cặp đang cần gửi yêu cầu tham gia.
+    """Tự động tham gia group đã BỎ HOÀN TOÀN theo yêu cầu mới nhất.
 
-    Chỉ những group mà CTV đã bật tự động tham gia, và chỉ khi trạng thái
-    chưa rõ ràng: đang chờ duyệt, đã thành viên hoặc bị từ chối thì không
-    gửi lại.
-
-    Group chưa từng được kiểm tra cũng được gửi yêu cầu, vì đó là lần đầu.
+    Trả về danh sách rỗng: hệ thống không tự động gửi yêu cầu tham gia,
+    không tự bấm nút Join và không tự trả lời câu hỏi group. Cột
+    ``auto_join`` và bảng ``group_memberships`` vẫn được giữ lại để truy vết,
+    nhưng không còn được module nào xử lý để thực hiện tham gia tự động.
     """
-    rows = conn.execute(f"""SELECT g.id group_id, g.account_id, g.url group_url,
-                                  g.label group_label, g.auto_join, g.join_answers_json,
-                                  g.posting_mode, g.nickname,
-                                  a.label account_label,
-                                  COALESCE(m.membership_status, ?) membership_status,
-                                  m.join_questions_json, m.updated_at membership_updated_at
-                           FROM groups g
-                           JOIN accounts a ON a.id=g.account_id
-                           LEFT JOIN {TABLE} m ON m.group_id=g.id AND m.account_id=g.account_id
-                                AND m.pipeline_id=g.pipeline_id
-                           WHERE g.pipeline_id=? AND g.auto_join=1 AND g.enabled=1
-                             AND (m.id IS NULL
-                                  OR m.membership_status NOT IN ({','.join('?' * len(SETTLED_STATUSES))}))
-                           ORDER BY COALESCE(m.updated_at, g.created_at) LIMIT ?""",
-                        (UNKNOWN, int(pipeline_id), *SETTLED_STATUSES, int(limit))).fetchall()
-    return [dict(row) for row in rows]
+    return []

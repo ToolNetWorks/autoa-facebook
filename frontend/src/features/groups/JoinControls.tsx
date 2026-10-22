@@ -68,21 +68,6 @@ export function JoinControls({
 
   const status = membership?.membership_status ?? 'unknown';
 
-  const setAutoJoin = async (enabled: boolean) => {
-    setBusy(true);
-    try {
-      await api.patch(`/api/pipelines/${pipelineId}/groups/${groupId}/auto-join`, {
-        auto_join: enabled,
-      });
-      push(enabled ? 'Đã bật tự động yêu cầu tham gia' : 'Đã tắt tự động yêu cầu tham gia', 'success');
-      onChanged();
-    } catch (failure) {
-      push(failure instanceof Error ? failure.message : 'Không đổi được cài đặt', 'error');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const requestJoin = async () => {
     setBusy(true);
     try {
@@ -142,12 +127,16 @@ export function JoinControls({
             <input
               type="checkbox"
               name={`auto_join_${groupId}`}
-              checked={membership?.auto_join ?? false}
-              disabled={busy}
-              onChange={(event) => void setAutoJoin(event.target.checked)}
+              checked={false}
+              disabled
+              readOnly
             />
-            <span>Tự động yêu cầu tham gia</span>
+            <span>Tự động yêu cầu tham gia (đã tắt)</span>
           </label>
+          <Alert tone="info">
+            Hệ thống không tự động tham gia group, không gửi yêu cầu tham gia và không trả lời
+            câu hỏi group. Hành động tham gia (nếu cần) chỉ thực hiện bởi bạn bên ngoài hệ thống.
+          </Alert>
           <Button size="sm" loading={busy} onClick={() => void requestJoin()}>
             {settled ? 'Kiểm tra lại' : 'Tham gia group'}
           </Button>

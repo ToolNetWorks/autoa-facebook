@@ -5578,11 +5578,13 @@ def execute_job(job: dict):
         payload_file.unlink(missing_ok=True)
         result_file.unlink(missing_ok=True)
     status = result.get("state", "needs_review")
-    if status not in ("failed", "needs_review", "submitted_unverified", "pending_approval"):
+    if status not in ("failed", "needs_review", "submitted_unverified", "pending_approval",
+                      "posted"):
         status = "needs_review"
     identity = str(result.get("identity", ""))[:120]
     verification = str(result.get("verification", ""))[:40] or "unverified"
     posting_status = {"posted": "posted", "submitted_unverified": "submitted_unverified",
+                      "pending_approval": "pending_approval",
                       "needs_review": "needs_review", "failed": "failed"}.get(status, "pending")
     if status == "submitted_unverified" and job.get("requires_approval"):
         posting_status = "pending_approval"
