@@ -1,9 +1,8 @@
 """Xác minh kết quả bài đăng sau khi nhấn nút Đăng.
 
-Không bao giờ kết luận thành công chỉ vì đã nhấn nút. Ba kết quả có thể:
+Không bao giờ kết luận thành công chỉ vì đã nhấn nút. Các kết quả có thể:
 
-* ``published`` — Facebook xác nhận bài đã đăng (thông báo hoặc hộp thoại
-  composer đóng).
+* ``published`` — Facebook xác nhận bài đã đăng (thông báo rõ ràng).
 * ``pending_approval`` — Facebook xác nhận bài đang chờ quản trị group duyệt.
 * ``rejected`` — Facebook từ chối bài đăng.
 * ``ambiguous`` — không xác nhận được. Bài **không** được gửi lại, vì có thể
@@ -53,7 +52,7 @@ async def wait_post_outcome(page: Page, body: str = "") -> dict:
 
     Trả về dict có ``state`` (published/pending_approval/rejected/ambiguous),
     ``details`` và ``permalink``. Không có kết quả nào được rút ra từ việc đã
-    bấm nút.
+    bấm nút. Hộp thoại đóng KHÔNG tự động nghĩa là bài đã đăng.
     """
     outcome = {"state": "ambiguous", "details": "", "permalink": ""}
     try:
@@ -71,12 +70,13 @@ async def wait_post_outcome(page: Page, body: str = "") -> dict:
             return outcome
     except Exception:
         pass
-    # Hộp thoại composer đóng lại là dấu hiệu Facebook đã nhận bài.
+    # Hộp thoại composer đóng lại KHÔNG tự động nghĩa là bài đã đăng.
+    # Dialog có thể đóng do lỗi, hủy, mạng, v.v. Chỉ ghi ambiguous.
     try:
         dialog = page.get_by_role("dialog").last
         await dialog.wait_for(state="hidden", timeout=12000)
-        outcome["state"] = "published"
-        outcome["details"] = "Hộp thoại tạo bài đã đóng, Facebook đã nhận bài."
+        outcome["details"] = ("Hộp thoại tạo bài đã đóng nhưng không có thông báo xác nhận; "
+                              "kết quả không xác định, không tự gửi lại.")
     except Exception:
         outcome["details"] = ("Không xác nhận được kết quả sau khi bấm Đăng; "
                               "không tự gửi lại để tránh đăng trùng.")
@@ -86,8 +86,8 @@ async def wait_post_outcome(page: Page, body: str = "") -> dict:
 async def newest_permalink(page: Page, body: str = "") -> str:
     """Liên kết của bài vừa viết, khi trang hiển thị nó.
 
-    Là thêm vào: khi không tìm thấy kết quả giữ nguyên. Khi biết văn bản bài
-    chỉ tính liên kết bên cạnh văn bản đó, để không nhầm với bài gắn hoặc cũ.
+    Chỉ tìm liên kết trong ngữ cảnh Group (article, feed, timeline).
+    Không lấy liên kết từ profile cá nhân, sidebar, header, v.v.
     """
     try:
         return await page.evaluate("""(body) => {
@@ -98,16 +98,23 @@ async def newest_permalink(page: Page, body: str = "") -> str:
                 return href.startsWith('http') ? href : new URL(href, location.origin).href;
             };
             const wanted = (body || '').trim();
+            // Chỉ tìm trong vùng nội dung chính của Group (feed, timeline)
+            const mainContent = document.querySelector('[role="main"], [data-pagelet="FeedUnit_0"], [role="feed"], div[data-pagelet^="FeedUnit"]');
+            const searchScope = mainContent || document.body;
+            const linksInScope = [...searchScope.querySelectorAll('a[href]')];
+            
+            const wanted = (body || '').trim();
             if (wanted) {
-                for (const link of links) {
+                for (const link of linksInScope) {
                     const href = post(link);
                     if (!href) continue;
-                    const holder = link.closest('div[data-testid="post_message"], div[role="article"], article') || link.parentElement;
+                    const holder = link.closest('div[data-testid="post_message"], div[role="article"], article, [data-pagelet^="FeedUnit"]') || link.parentElement;
                     const text = holder ? (holder.innerText || '') : '';
                     if (text.includes(wanted.slice(0, 40))) return href;
                 }
             }
-            for (const link of links) {
+            // Fallback: first post link in scope
+            for (const link of linksInScope) {
                 const href = post(link);
                 if (href) return href;
             }
