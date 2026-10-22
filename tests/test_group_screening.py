@@ -286,7 +286,12 @@ def test_two_accounts_in_one_group_can_have_different_states(client, monkeypatch
 
 # --- the publishing queue respects the screening ----------------------------
 
-def test_a_job_of_an_unknown_group_is_not_published(client, monkeypatch):
+def test_a_group_that_never_posted_gets_its_first_post(client, monkeypatch):
+    """Group chưa từng đăng vẫn được đăng bài đầu tiên.
+
+    Bài đầu tiên chính là lần xác minh, nên group chưa có bằng chứng không bị
+    chặn. Những group đã bị xác nhận hạn chế mới bị chặn.
+    """
     pipeline = make_pipeline(client, '@scr5')
     account = make_account(client, pipeline)
     group = make_group(client, pipeline, account)
@@ -296,13 +301,37 @@ def test_a_job_of_an_unknown_group_is_not_published(client, monkeypatch):
     created = client.post(f'/api/pipelines/{pipeline}/group-posts', json={
         'group_ids': [group['id']], 'body': 'Xin chào', 'media': [image], 'scheduled_at': scheduled})
     assert created.status_code == 201
-    job_id = created.json()['jobs'][0]['job_id']
-    # the group was never screened, so the job waits
-    assert m.claim_next_job() is None
+    body = created.json()
+    assert body['jobs_created'] == 1
+    job_id = body['jobs'][0]['job_id']
     with m.db() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    # Bài được tạo và chờ đến lịch; nó chưa được coi là đã đăng.
     assert row['state'] == 'queued'
-    assert 'chưa được xác minh' in row['details']
+    assert row['posting_status'] == 'pending'
+
+
+def test_a_group_with_a_confirmed_restriction_is_never_published(client, monkeypatch):
+    """Group đã bị xác nhận Facebook hạn chế quyền đăng thì không đăng nữa."""
+    pipeline = make_pipeline(client, '@scr5b')
+    account = make_account(client, pipeline)
+    group = make_group(client, pipeline, account)
+    with m.db() as conn:
+        group_verification.record_outcome(conn, pipeline, account, group['id'],
+                                          group_verification.RESTRICTED_CONFIRMED)
+        conn.execute("UPDATE groups SET screening_status='restricted_confirmed' WHERE id=?",
+                     (group['id'],))
+        conn.commit()
+    image = client.post('/api/uploads', params={'pipeline_id': pipeline},
+                        files={'file': ('a.jpg', b'\xff\xd8\xff' + b'0' * 60, 'image/jpeg')}).json()['path']
+    scheduled = m.iso(m.now() + m.timedelta(hours=2))
+    created = client.post(f'/api/pipelines/{pipeline}/group-posts', json={
+        'group_ids': [group['id']], 'body': 'Xin chào', 'media': [image], 'scheduled_at': scheduled})
+    assert created.status_code == 201
+    body = created.json()
+    assert body['jobs_created'] == 0
+    assert body['skipped'][0]['reason']
+    assert m.claim_next_job() is None
 
 
 def test_a_verified_group_is_served_before_a_review_group(client, monkeypatch):

@@ -110,6 +110,20 @@ export interface GroupRow {
   screening_checked_at: string | null;
   check_status: string;
   last_checked_at: string | null;
+  /** Phân loại học được từ kết quả đăng bài thật. */
+  classification: 'no_approval' | 'needs_approval' | 'unclassified';
+  classification_label: string;
+  classification_tone: 'ok' | 'warn' | 'neutral';
+  priority: 'high' | 'low' | 'none';
+  priority_rank: number;
+  /** Khả năng đăng mà group thực sự hỗ trợ. */
+  supports_anonymous: boolean;
+  supports_nickname: boolean;
+  capability_state: 'known' | 'unknown';
+  /** Chế độ CTV đã chọn, khác với khả năng đăng. */
+  selected_posting_mode: 'anonymous' | 'nickname';
+  last_verified_at: string | null;
+  last_post_status: string;
   posted_count: number;
   pending_count: number;
   failed_count: number;

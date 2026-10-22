@@ -192,7 +192,8 @@ def test_no_two_accounts_post_at_the_same_moment(client):
 
 # --- group -------------------------------------------------------------------
 
-def test_group_waiting_for_approval_is_not_scheduled(client):
+def test_group_waiting_for_approval_is_served_after_the_priority_groups(client):
+    """Group cần duyệt vẫn được xếp lịch, nhưng sau group ưu tiên cao."""
     pipeline = make_pipeline(client, '@v9_group')
     account = make_account(client, pipeline, 'Facebook A')
     make_group(client, pipeline, account, 'Group chờ duyệt',
@@ -203,7 +204,8 @@ def test_group_waiting_for_approval_is_not_scheduled(client):
     inside = time_windows.now_in('Asia/Ho_Chi_Minh').replace(hour=9, minute=0)
     with m.db() as conn:
         outcome = job_allocator.plan(conn, pipeline, inside)
-    assert outcome["jobs"] == []
+    # Group cần duyệt vẫn được phục vụ, chỉ là ở mức ưu tiên thấp.
+    assert len(outcome["jobs"]) == 1
 
 
 def test_group_cooldown_is_respected(client):

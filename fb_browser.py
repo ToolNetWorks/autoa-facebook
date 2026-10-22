@@ -740,7 +740,7 @@ async def join_group(data: dict) -> dict:
                     page.get_by_text(re.compile(r"^(Join|Tham gia|Submit|Gửi)$", re.I)),
                 ], timeout=2000)
                 if submit is not None:
-                    await submit.click(timeout=10000)
+                    await click_element(submit, timeout=10000)
                     await page.wait_for_timeout(3000)
                 try:
                     body = (await page.locator("body").inner_text(timeout=8000))[:8000]
@@ -901,7 +901,8 @@ async def attempt_post(data: dict):
             ])
             if compose is None:
                 return result("failed", "Composer not found. Facebook interface may have changed; no post submitted")
-            await compose.click(timeout=10000)
+            if not await click_element(compose, timeout=10000):
+                return result("failed", "Không mở được ô soạn bài; không đăng bài")
             await page.wait_for_timeout(1500)
             actual_identity, verification, identity_error = await enforce_posting_identity(
                 page, mode, nickname)
@@ -977,7 +978,8 @@ async def attempt_post(data: dict):
             if not await submit.is_enabled():
                 return result("failed", "Publish control disabled; no post submitted")
             was_clicked = True
-            await submit.click(timeout=15000)
+            if not await click_element(submit, timeout=15000):
+                return result("failed", "Không bấm được nút đăng; không đăng bài")
             await page.wait_for_timeout(5000)
             permalink = await newest_permalink(page, str(data.get("body") or ""))
             await page.screenshot(path=str(evidence_path), full_page=False, timeout=15000)

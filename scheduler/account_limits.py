@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+from scheduler import time_windows
+
 try:  # pragma: no cover - múi giờ có sẵn trong Python 3.9+
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
@@ -25,6 +27,8 @@ except ImportError:  # pragma: no cover
 DEFAULT_TIMEZONE = "Asia/Ho_Chi_Minh"
 DEFAULT_DAILY_LIMIT = 3
 DEFAULT_MIN_GAP_MINUTES = 60
+#: So bai cho group "can duyet" duoc chay cung luc.
+DEFAULT_MAX_PENDING_APPROVALS = 1
 
 
 def now_in(timezone_name: str) -> datetime:
@@ -57,6 +61,7 @@ DEFAULT_SETTINGS = {
     "require_approval": True,
     "apply_to_new_accounts": True,
     "timezone": DEFAULT_TIMEZONE,
+    "max_pending_approvals": DEFAULT_MAX_PENDING_APPROVALS,
 }
 
 
@@ -116,13 +121,18 @@ def is_paused(conn, account_id: int) -> bool:
     return bool(limits_of(conn, account_id)["paused"])
 
 
-def usage_of(conn, account_id: int, day: str) -> dict:
+def usage_of(conn, account_id: int, day: str, moment: datetime | None = None) -> dict:
     """How many posts this account used today.
 
     Bộ đếm và bảng ``jobs`` được đối chiếu với nhau: bộ đếm giữ suất dự phòng
     cho bài đã bấm đăng nhưng chưa xác minh, còn bảng ``jobs`` là sự thật của
     những bài đã đăng. Số lớn hơn được lấy, nên một worker bị gián đoạn không
     làm sai hạn mức.
+
+    Ngày được tính theo múi giờ của Workspace. Vì vậy khoảng thời gian lấy từ
+    ``jobs`` được so sánh bằng hai mốc UTC của ngày đó, chứ không dùng
+    ``date()`` của SQLite vì hàm đó đổi sang UTC và làm lệch ngày quanh nửa
+    đêm.
     """
     row = conn.execute("""SELECT COALESCE(SUM(published),0) published,
                                   COALESCE(SUM(reserved),0) reserved
@@ -133,10 +143,18 @@ def usage_of(conn, account_id: int, day: str) -> dict:
     real = conn.execute("""SELECT COUNT(*) FROM jobs
                             WHERE account_id=? AND state IN
                               ('posted','submitted_unverified','pending_approval')
-                              AND date(COALESCE(published_at, updated_at))=date(?)""",
-                         (int(account_id), day)).fetchone()[0]
+                              AND datetime(COALESCE(published_at, updated_at)) >= datetime(?)
+                              AND datetime(COALESCE(published_at, updated_at)) < datetime(?)""",
+                         (int(account_id), *_day_bounds(moment, day))).fetchone()[0]
     published = max(published, int(real))
     return {"published": published, "reserved": reserved, "used": published + reserved}
+
+
+def _day_bounds(moment: datetime | None, day: str) -> tuple[str, str]:
+    """Hai mốc UTC của một ngày theo múi giờ của Workspace."""
+    if moment is None:
+        moment = datetime.now(timezone.utc)
+    return time_windows.day_bounds_utc(moment, day)
 
 
 def group_usage_of(conn, group_id: int, day: str) -> int:
@@ -193,13 +211,15 @@ def reconcile(conn, pipeline_id: int) -> None:
 
     A crash of the worker must never leave a wrong counter behind.
     """
+    timezone_name = pipeline_timezone(conn, pipeline_id)
+    zone = time_windows.zone(timezone_name)
     rows = conn.execute("""SELECT j.account_id, j.group_id, j.posting_status, j.state,
-                                  date(COALESCE(j.published_at, j.updated_at)) day
+                                  COALESCE(j.published_at, j.updated_at) moment
                              FROM jobs j WHERE j.pipeline_id=?""", (int(pipeline_id),)).fetchall()
     conn.execute("DELETE FROM posting_counters WHERE account_id IN"
                  " (SELECT id FROM accounts WHERE pipeline_id=?)", (int(pipeline_id),))
     for row in rows:
-        day = row["day"]
+        day = _local_day(row["moment"], zone)
         if not day:
             continue
         status = row["posting_status"] or row["state"]
@@ -209,11 +229,36 @@ def reconcile(conn, pipeline_id: int) -> None:
             reserve(conn, row["account_id"], row["group_id"], day)
 
 
+def pipeline_timezone(conn, pipeline_id: int) -> str:
+    """Múi giờ của Workspace, dùng để tính ngày của hạn mức."""
+    row = conn.execute("""SELECT timezone FROM pipeline_auto_post_settings
+                          WHERE pipeline_id=?""", (int(pipeline_id),)).fetchone()
+    if row is None or not row["timezone"]:
+        row = conn.execute("""SELECT timezone FROM pipeline_posting_schedule
+                              WHERE pipeline_id=?""", (int(pipeline_id),)).fetchone()
+    if row is not None and row["timezone"]:
+        return row["timezone"]
+    return DEFAULT_TIMEZONE
+
+
+def _local_day(value: str | None, zone) -> str:
+    """Ngày theo múi giờ của Workspace của một mốc thời gian."""
+    if not value:
+        return ""
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(zone).strftime("%Y-%m-%d")
+
+
 def account_state(conn, account_id: int, settings: dict, moment: datetime | None = None) -> dict:
     """Everything the dashboard needs to know about one account."""
     moment = moment or now_in(settings.get("timezone", DEFAULT_TIMEZONE))
     day = day_of(moment)
-    usage = usage_of(conn, account_id, day)
+    usage = usage_of(conn, account_id, day, moment)
     limit = effective_limit(conn, account_id, settings)
     gap = effective_gap(conn, account_id, settings)
     last = last_post_at(conn, account_id)

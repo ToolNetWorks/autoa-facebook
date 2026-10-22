@@ -195,6 +195,31 @@ def spread_slots(windows: list[tuple[datetime, datetime]], quotas: dict[int, int
     return slots
 
 
+def day_of(moment: datetime) -> str:
+    """Ngày theo múi giờ của Workspace, dạng YYYY-MM-DD."""
+    return moment.strftime("%Y-%m-%d")
+
+
+def day_bounds_utc(moment: datetime, day: str | None = None) -> tuple[str, str]:
+    """Đầu ngày và đầu ngày tiếp theo, theo múi giờ Workspace, ở dạng UTC.
+
+    Hạn mức bài mỗi ngày phải tính theo ngày của Workspace, không theo ngày
+    UTC của máy chủ. Hai mốc này quyết định mọi truy vấn đếm bài trong ngày,
+    nên chúng được tính một chỗ và dùng lại.
+
+    Việc cộng một ngày giữ nguyên giờ tường nên đúng cả khi múi giờ có giờ
+    tiết kiệm ban ngày: đầu ngày tiếp theo vẫn là nửa đêm địa phương.
+    """
+    local_day = day or moment.strftime("%Y-%m-%d")
+    try:
+        start_local = datetime.fromisoformat(f"{local_day}T00:00:00").replace(tzinfo=moment.tzinfo)
+    except ValueError:
+        start_local = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    return (start_local.astimezone(timezone.utc).isoformat(timespec="seconds"),
+            end_local.astimezone(timezone.utc).isoformat(timespec="seconds"))
+
+
 def describe(settings: dict, moment: datetime | None = None) -> dict:
     """Mô tả ngắn cấu hình lịch, dùng cho giao diện."""
     moment = moment or now_in(settings.get("timezone", DEFAULT_TIMEZONE))

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from scheduler import time_windows
+
 DEFAULT_GROUP_COOLDOWN = 120
 
 
@@ -17,11 +19,18 @@ def last_group_post_at(conn, group_id: int) -> str | None:
     return row["moment"] if row and row["moment"] else None
 
 
-def group_usage_today(conn, group_id: int, day: str) -> int:
-    """Số bài đã đăng vào group hôm nay."""
+def group_usage_today(conn, group_id: int, day: str,
+                      moment: datetime | None = None) -> int:
+    """Số bài đã đăng vào group hôm nay, theo ngày của Workspace.
+
+    Khoảng thời gian được so sánh bằng hai mốc UTC của ngày đó, nên bài đăng
+    lúc khuya không bị tính sang hôm trước.
+    """
+    start, end = time_windows.day_bounds_utc(moment or datetime.now().astimezone(), day)
     row = conn.execute("""SELECT COUNT(*) FROM jobs WHERE group_id=?
-                           AND date(COALESCE(published_at, updated_at))=date(?)""",
-                        (int(group_id), day)).fetchone()
+                           AND datetime(COALESCE(published_at, updated_at)) >= datetime(?)
+                           AND datetime(COALESCE(published_at, updated_at)) < datetime(?)""",
+                        (int(group_id), start, end)).fetchone()
     return int(row[0] or 0)
 
 

@@ -52,7 +52,8 @@ Không có điều kiện nào được bỏ qua, và không có điều kiện 
 """
 from __future__ import annotations
 
-from services import group_membership, group_screening, group_verification
+from services import (group_classification, group_membership, group_screening,
+                     group_verification)
 
 #: Trạng thái nghiệp vụ của một cặp Facebook–Group. Đây là cách nói chung
 #: cho giao diện, không thay thế trạng thái bằng chứng đã lưu.
@@ -167,10 +168,13 @@ def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
                     "Chờ group duyệt rồi thử lại.", mode,
                     decision=WAITING_MEMBERSHIP)
     if membership == group_membership.JOIN_REJECTED:
-        return _no(group_verification.RESTRICTED_CONFIRMED,
-                    "Group đã từ chối cho tài khoản này tham gia.",
-                    "Dùng tài khoản khác cho group này.", mode,
-                    decision=CONFIRMED_RESTRICTED)
+        # Yêu cầu tham gia bị từ chối KHÔNG có nghĩa Facebook hạn chế quyền
+        # đăng. Tài khoản có thể vẫn đăng được nếu đã vào group từ đường khác,
+        # nên trạng thái thành viên giữ riêng và không suy ra hạn chế đăng.
+        return _no(group_verification.NOT_TESTED,
+                    "Group đã từ chối yêu cầu tham gia của tài khoản này.",
+                    "Dùng tài khoản khác cho group này, hoặc tham gia bằng tài khoản đó.",
+                    mode, decision=NEEDS_ACTION)
 
     # 5. Xác định loại kiểm tra: FIRST POST hay RECURRING POST.
     status = group_verification.servable_status_of(conn, pipeline_id, account_id, group_id, mode)
@@ -190,16 +194,33 @@ def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
                     _action_of(status, evidence), mode,
                     decision=_decision_of(status))
 
+    # Trạng thái nghiệp vụ lấy từ phân loại đã học được từ bằng chứng.
+    classification = group_classification.classification_of(conn, pipeline_id, account_id, group_id)
+    decision = _decision_from_classification(classification, status)
     return {"eligible": True, "status": status,
             "reason": group_screening.guidance_of(evidence, status),
             "action": _action_of(status, evidence), "mode": mode,
             "first_post_eligible": False, "recurring_eligible": True,
-            "decision": VERIFIED_READY}
+            "decision": decision}
 
 def _no(status: str, reason: str, action: str, mode: str, decision: str = NEEDS_ACTION) -> dict:
     return {"eligible": False, "status": status, "reason": reason, "action": action,
             "mode": mode, "recurring_eligible": False, "first_post_eligible": False,
             "decision": decision}
+
+
+def _decision_from_classification(classification: dict, status: str) -> str:
+    """Trạng thái nghiệp vụ từ phân loại, nếu chưa có thì từ bằng chứng."""
+    if classification.get("configured"):
+        name = classification.get("classification")
+        if name == group_classification.NO_APPROVAL:
+            return VERIFIED_READY
+        if name == group_classification.NEEDS_APPROVAL:
+            return WAITING_APPROVAL
+        return FIRST_POST_READY
+    if status == group_verification.PENDING_GROUP_APPROVAL:
+        return WAITING_APPROVAL
+    return VERIFIED_READY
 
 
 def _decision_of(status: str) -> str:
@@ -287,9 +308,19 @@ def eligible_pairs(conn, pipeline_id: int, groups: list[dict],
             item = dict(group)
             item["eligible_account_ids"] = allowed
             result.append(item)
-    result.sort(key=lambda item: (0 if item.get("screening_status") == group_verification.VERIFIED_POSTED
-                                  else 1, item.get("id", 0)))
+    # Thứ tự phục vụ: đã xác minh đăng trực tiếp, rồi chưa phân loại (bài
+    # đầu tiên), rồi group cần quản trị duyệt.
+    classifications = group_classification.pairs_of(conn, pipeline_id)
+    result.sort(key=lambda item: _priority_rank(classifications, item))
     return result
+
+
+def _priority_rank(classifications: dict, group: dict) -> tuple:
+    key = (int(group.get("account_id") or 0), int(group.get("id") or 0))
+    entry = classifications.get(key)
+    rank = entry["priority_rank"] if entry else group_classification.PRIORITY_ORDER[
+        group_classification.UNCLASSIFIED]
+    return (rank, int(group.get("id") or 0))
 
 
 def _candidate_accounts(conn, pipeline_id: int, group: dict) -> list[int]:

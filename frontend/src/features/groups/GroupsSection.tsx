@@ -11,33 +11,11 @@ import { JoinControls, useMemberships } from '@/features/groups/JoinControls';
 import type { GroupRow } from '@/types/api';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
-const STATUS_TONE: Record<string, 'ok' | 'warn' | 'bad' | 'neutral' | 'info'> = {
-  verified_posted: 'ok',
-  pending_group_approval: 'warn',
-  submitted_unverified: 'warn',
-  test_in_progress: 'info',
-  rejected: 'bad',
-  restricted_confirmed: 'bad',
-  check_failed: 'bad',
-  not_tested: 'neutral',
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  verified_posted: 'Đã xác minh đăng',
-  pending_group_approval: 'Chờ group duyệt',
-  submitted_unverified: 'Đã gửi, chưa xác nhận',
-  test_in_progress: 'Đang xác minh',
-  rejected: 'Bị từ chối',
-  restricted_confirmed: 'Facebook hạn chế',
-  check_failed: 'Chưa xác minh được',
-  not_tested: 'Chưa xác minh',
-};
-
 const FILTERS = [
   { id: 'all', label: 'Tất cả' },
-  { id: 'ready', label: 'Đã xác minh' },
-  { id: 'review', label: 'Chờ group duyệt' },
-  { id: 'blocked', label: 'Chưa đủ điều kiện' },
+  { id: 'no_approval', label: 'Đăng Không Cần Duyệt' },
+  { id: 'needs_approval', label: 'Cần Duyệt' },
+  { id: 'unclassified', label: 'Chưa phân loại' },
 ];
 
 interface Draft {
@@ -79,14 +57,20 @@ export function GroupsSection({ workspace }: { workspace: WorkspaceData }) {
 
   const visible = useMemo(() => {
     return groups.filter((group) => {
-      if (filter === 'ready') return group.screening_status === 'verified_posted';
-      if (filter === 'review') return group.screening_status === 'pending_group_approval';
-      if (filter === 'blocked') {
-        return !['verified_posted', 'pending_group_approval'].includes(group.screening_status);
-      }
+      if (filter === 'no_approval') return group.classification === 'no_approval';
+      if (filter === 'needs_approval') return group.classification === 'needs_approval';
+      if (filter === 'unclassified') return group.classification === 'unclassified';
       return true;
     });
   }, [groups, filter]);
+
+  const classificationCounts = useMemo(() => {
+    const counts = { no_approval: 0, needs_approval: 0, unclassified: 0 };
+    groups.forEach((group) => {
+      if (counts[group.classification] !== undefined) counts[group.classification] += 1;
+    });
+    return counts;
+  }, [groups]);
 
   async function saveDraft() {
     if (!draft) return;
@@ -226,13 +210,11 @@ export function GroupsSection({ workspace }: { workspace: WorkspaceData }) {
           count:
             entry.id === 'all'
               ? groups.length
-              : groups.filter((group) =>
-                  entry.id === 'ready'
-                    ? group.screening_status === 'priority' || group.screening_status === 'review'
-                    : entry.id === 'review'
-                      ? group.screening_status === 'review'
-                      : group.screening_status === 'restricted' || group.screening_status === 'failed',
-                ).length,
+              : entry.id === 'no_approval'
+                ? classificationCounts.no_approval
+                : entry.id === 'needs_approval'
+                  ? classificationCounts.needs_approval
+                  : classificationCounts.unclassified,
         }))}
         active={filter}
         onChange={setFilter}
@@ -251,7 +233,7 @@ export function GroupsSection({ workspace }: { workspace: WorkspaceData }) {
         <EmptyState title="Chưa có group nào" description="Thêm group bằng link để bắt đầu." />
       ) : (
         <Card>
-          <DataTable head={['Group', 'Tài khoản', 'Chế độ', 'Xác minh', 'Thành viên', 'Nguồn', 'Thao tác']}>
+          <DataTable head={['Group', 'Tài khoản', 'Phân loại', 'Chế độ', 'Khả năng đăng', 'Thành viên', 'Thao tác']}>
             {visible.map((group) => (
               <tr key={group.id}>
                 <td>
@@ -262,19 +244,28 @@ export function GroupsSection({ workspace }: { workspace: WorkspaceData }) {
                 </td>
                 <td>{group.account_label ?? '—'}</td>
                 <td>
-                  <Badge tone={group.posting_mode === 'nickname' ? 'info' : 'neutral'}>
-                    {group.posting_mode === 'nickname' ? 'Biệt danh' : 'Ẩn danh'}
+                  <Badge tone={group.classification_tone}>
+                    {group.classification_label}
+                  </Badge>
+                  <div className="cell-sub">
+                    {group.last_verified_at
+                      ? new Date(group.last_verified_at).toLocaleString('vi-VN')
+                      : 'chưa xác minh'}
+                  </div>
+                </td>
+                <td>
+                  <Badge tone={group.selected_posting_mode === 'nickname' ? 'info' : 'neutral'}>
+                    {group.selected_posting_mode === 'nickname' ? 'Biệt danh' : 'Ẩn danh'}
                   </Badge>
                   {group.nickname ? <div className="cell-sub">{group.nickname}</div> : null}
                 </td>
                 <td>
-                  <Badge tone={STATUS_TONE[group.screening_status] ?? 'neutral'}>
-                    {STATUS_LABEL[group.screening_status] ?? group.screening_status}
-                  </Badge>
-                  <div className="cell-sub">
-                    {group.last_checked_at
-                      ? new Date(group.last_checked_at).toLocaleString('vi-VN')
-                      : 'chưa xác minh'}
+                  <div className="badge-row">
+                    {group.supports_anonymous ? <Badge tone="ok">Ẩn danh</Badge> : null}
+                    {group.supports_nickname ? <Badge tone="ok">Biệt danh</Badge> : null}
+                    {group.capability_state === 'unknown' ? (
+                      <Badge tone="neutral">Chưa xác định</Badge>
+                    ) : null}
                   </div>
                 </td>
                 <td>

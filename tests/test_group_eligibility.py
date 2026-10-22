@@ -228,10 +228,11 @@ def test_a_failed_check_does_not_block_the_pair_for_ever(client):
 
 # --- 9. group yêu cầu Admin duyệt bài ---------------------------------------
 
-def test_a_group_that_needs_approval_is_not_auto_posted(client):
-    """Bài chờ quản trị group duyệt thì hệ thống không tự đăng vào đó.
+def test_a_group_that_needs_approval_is_served_at_low_priority(client):
+    """Group cần quản trị group duyệt vẫn dùng được, nhưng ưu tiên thấp.
 
-    Mỗi bài đều cần người duyệt, nên group đó do người dùng đăng tay.
+    Bài chờ duyệt không được coi là đã công khai, và số bài chờ duyệt được
+    kiểm soát, nên group này không bị loại bỏ vô lý.
     """
     pipeline = make_pipeline(client, '@el9')
     account = make_account(client, pipeline, 'Facebook')
@@ -240,7 +241,7 @@ def test_a_group_that_needs_approval_is_not_auto_posted(client):
     with m.db() as conn:
         store_result(conn, pipeline, account, group, STATUS_REVIEW, requires_approval=True)
         result = decision(conn, pipeline, account, group)
-    assert result['eligible'] is False
+    assert result['eligible'] is True
     assert result['status'] == group_verification.PENDING_GROUP_APPROVAL
     assert result['decision'] == group_eligibility.WAITING_APPROVAL
 

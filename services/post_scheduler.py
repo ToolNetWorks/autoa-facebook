@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone
 
 from services import ai_provider, duplicate_guard, posting_limits
-from services import group_eligibility, group_verification
+from services import group_classification, group_eligibility, group_verification
 from services.auto_posting import create_caption
 from services.caption_validator import analyze_caption
 from services.image_selection import select_media
@@ -177,6 +177,9 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
     notes = []
     no_media = False
     eligible_by_account: dict[str, int] = {}
+    max_pending_approvals = max(0, int(settings.get("max_pending_approvals") or 0))
+    pending_approvals = group_classification.pending_approval_count(conn, pipeline_id)
+    classifications = group_classification.pairs_of(conn, pipeline_id)
     if not eligible:
         notes.append("Chưa có cặp Facebook–Group nào đủ điều kiện đăng tự động trong Workspace")
     if not accounts:
@@ -201,6 +204,14 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
         for group in own_groups:
             if state["used"] >= state["daily_limit"]:
                 break
+            # So bai cho group "can duyet" duoc gioi han, de khong gui lien tuc
+            # vao mot group moi bai deu can nguoi duyet.
+            entry = classifications.get((account["id"], group["id"]))
+            if (entry is not None
+                    and entry["classification"] == group_classification.NEEDS_APPROVAL
+                    and pending_approvals >= max_pending_approvals):
+                notes.append(f"{group.get('label')}: đang chờ group duyệt, tạm dừng gửi thêm")
+                continue
             if (group.get("posting_mode") == "nickname"
                     and not (group.get("nickname") or "").strip()):
                 notes.append(f"{group.get('label')}: chưa có tên biệt danh")

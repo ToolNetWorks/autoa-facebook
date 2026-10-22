@@ -716,6 +716,21 @@ table.data td.actions {
   border-bottom-color: var(--accent);
 }
 
+.tab-count {
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  color: var(--text-muted);
+  font-size: var(--fs-11);
+  font-weight: 600;
+}
+
+.tab.active .tab-count {
+  background: var(--accent);
+  color: #fff;
+}
+
 .segmented {
   display: inline-flex;
   padding: 3px;

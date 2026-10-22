@@ -297,9 +297,12 @@ def allocate(conn, pipeline_id: int, moment: datetime | None = None,
     schedule = schedule_of(conn, pipeline_id)
     moment = moment or time_windows.now_in(schedule["timezone"])
     day = moment.strftime("%Y-%m-%d")
+    start, end = time_windows.day_bounds_utc(moment, day)
     existing = conn.execute("""SELECT COUNT(*) FROM auto_post_jobs
-                               WHERE pipeline_id=? AND date(scheduled_for)=date(?)""",
-                            (int(pipeline_id), day)).fetchone()[0]
+                               WHERE pipeline_id=?
+                                 AND datetime(scheduled_for) >= datetime(?)
+                                 AND datetime(scheduled_for) < datetime(?)""",
+                            (int(pipeline_id), start, end)).fetchone()[0]
     outcome = plan(conn, pipeline_id, moment, provider_config)
     jobs = outcome.get("jobs", [])
     if existing >= len(jobs):

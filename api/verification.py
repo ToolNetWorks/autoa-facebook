@@ -20,7 +20,8 @@ from typing import Callable
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from services import group_eligibility, group_membership, group_verification
+from services import (group_classification, group_eligibility, group_membership,
+                     group_verification)
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def build_router(deps: Deps) -> APIRouter:
                                   (pipeline_id,)).fetchall()
             verifications = group_verification.pairs_of(conn, pipeline_id)
             memberships = group_membership.pairs_of(conn, pipeline_id)
+            classifications = group_classification.pairs_of(conn, pipeline_id)
             result = []
             for group in groups:
                 for account_id in _accounts_of_group(conn, group):
@@ -107,8 +109,19 @@ def build_router(deps: Deps) -> APIRouter:
                     item["decision"] = decision.get("decision", group_eligibility.NEEDS_ACTION)
                     item["reason"] = decision.get("reason", "")
                     item["next_action"] = decision.get("action", "")
+                    entry = classifications.get(key)
+                    if entry is not None:
+                        item["classification"] = entry["classification"]
+                        item["classification_label"] = entry["label"]
+                        item["classification_tone"] = entry["tone"]
+                        item["priority"] = entry["priority"]
+                        item["priority_rank"] = entry["priority_rank"]
+                        item["supports_anonymous"] = entry["supports_anonymous"]
+                        item["supports_nickname"] = entry["supports_nickname"]
+                        item["capability_state"] = entry["capability_state"]
                     result.append(item)
-        return {"ok": True, "verifications": result}
+            counts = group_classification.counts_of(conn, pipeline_id)
+        return {"ok": True, "verifications": result, "counts": counts}
 
     @router.get("/api/pipelines/{pipeline_id}/groups/{group_id}/verification")
     def verification_of(pipeline_id: int, group_id: int,

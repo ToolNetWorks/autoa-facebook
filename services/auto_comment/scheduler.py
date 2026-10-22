@@ -13,6 +13,9 @@ from app import db, iso
 
 LOG = logging.getLogger("facebook-pipeline.auto-comment.scheduler")
 
+#: Múi giờ mặc định khi Workspace chưa cấu hình.
+DEFAULT_TIMEZONE = "Asia/Ho_Chi_Minh"
+
 Mode = Literal["group", "feed"]
 Status = Literal["enabled", "disabled", "paused", "error"]
 JobStatus = Literal["pending", "scheduled", "ready", "posting", "posted", "failed", "submitted_unverified", "cancelled", "duplicate_limit"]
@@ -73,6 +76,45 @@ class AccountDailyLimits:
 
 DEFAULT_MIN_INTERVAL_SECONDS = 300  # 5 minutes
 MAX_CONCURRENT_POSTING = 2  # per pipeline
+
+
+def _day_bounds_utc(pipeline_id: int, day: str) -> tuple[str, str]:
+    """Hai moc UTC cua mot ngay theo mui gio cua Workspace."""
+    name = DEFAULT_TIMEZONE
+    with db() as conn:
+        row = conn.execute("""SELECT timezone FROM auto_comment_settings WHERE pipeline_id=?""",
+                           (int(pipeline_id),)).fetchone()
+        if row is None:
+            row = conn.execute("""SELECT timezone FROM pipeline_auto_post_settings
+                                  WHERE pipeline_id=?""", (int(pipeline_id),)).fetchone()
+    if row is not None and row["timezone"]:
+        name = row["timezone"]
+    try:
+        import pytz
+        zone = pytz.timezone(name)
+    except Exception:
+        zone = datetime.now().astimezone().tzinfo
+    start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=zone)
+    end = start + datetime.timedelta(days=1)
+    return (start.astimezone(datetime.timezone.utc).isoformat(timespec="seconds"),
+            end.astimezone(datetime.timezone.utc).isoformat(timespec="seconds"))
+
+
+def _workspace_day(pipeline_id: int) -> str:
+    """Ngay theo mui gio cua Workspace, de han muc khong lech o ranh giooi."""
+    with db() as conn:
+        row = conn.execute("""SELECT timezone FROM auto_comment_settings WHERE pipeline_id=?""",
+                           (int(pipeline_id),)).fetchone()
+    if row is None:
+        row = conn.execute("""SELECT timezone FROM pipeline_auto_post_settings
+                              WHERE pipeline_id=?""", (int(pipeline_id),)).fetchone()
+    name = (row["timezone"] if row else None) or DEFAULT_TIMEZONE
+    try:
+        import pytz
+        zone = pytz.timezone(name)
+    except Exception:
+        zone = datetime.now().astimezone().tzinfo
+    return datetime.now(zone).date().isoformat()
 
 
 class AutoCommentScheduler:
@@ -161,8 +203,8 @@ class AutoCommentScheduler:
             return current_hour >= start or current_hour < end
     
     def get_account_limits(self, account_id: int) -> AccountDailyLimits:
-        """Get today's limits for an account."""
-        today = datetime.now().date().isoformat()
+        """Get today's limits for an account, counted in the workspace day."""
+        today = _workspace_day(self.pipeline_id)
         
         with db() as conn:
             row = conn.execute(
@@ -210,15 +252,17 @@ class AutoCommentScheduler:
         return True, "OK"
     
     def get_pipeline_daily_count(self) -> int:
-        """Get total comments posted today for this pipeline."""
-        today = datetime.now().date().isoformat()
+        """Get total comments posted today for this pipeline, in the workspace day."""
+        today = _workspace_day(self.pipeline_id)
+        start, end = _day_bounds_utc(self.pipeline_id, today)
         
         with db() as conn:
             row = conn.execute(
                 """SELECT COUNT(*) as cnt FROM auto_comment_jobs
                    WHERE pipeline_id = ? AND status = 'posted'
-                     AND DATE(posted_at) = ?""",
-                (self.pipeline_id, today)
+                     AND datetime(posted_at) >= datetime(?)
+                     AND datetime(posted_at) < datetime(?)""",
+                (self.pipeline_id, start, end)
             ).fetchone()
             return row["cnt"] if row else 0
     
@@ -352,10 +396,11 @@ def mark_job_submitted_unverified(conn, job_id: int) -> None:
     update_job_status(conn, job_id, "submitted_unverified")
 
 
-def increment_account_limit(conn, account_id: int) -> None:
-    """Increment daily comment count for an account."""
+def increment_account_limit(conn, account_id: int, pipeline_id: int | None = None) -> None:
+    """Increment daily comment count for an account, in the workspace day."""
     from app import iso
-    today = datetime.now().date().isoformat()
+    today = (_workspace_day(pipeline_id) if pipeline_id
+             else datetime.now().date().isoformat())
     
     conn.execute(
         """INSERT INTO auto_comment_account_limits (account_id, date, comments_posted, last_comment_at)

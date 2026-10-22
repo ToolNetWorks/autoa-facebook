@@ -72,10 +72,12 @@ HAS_POST_EVIDENCE = (VERIFIED_POSTED, PENDING_GROUP_APPROVAL)
 #: group này.
 SERVABLE_STATUSES = (VERIFIED_POSTED, PENDING_GROUP_APPROVAL)
 
-#: Những trạng thái cho phép bộ xếp lịch phục vụ cặp này. Một group mà bài
-#: phải chờ quản trị group duyệt thì mỗi bài đều cần người duyệt, nên hệ
-#: thống không tự đăng vào đó.
-AUTO_POSTABLE_STATUSES = (VERIFIED_POSTED,)
+#: Những trạng thái cho phép bộ xếp lịch phục vụ cặp này.
+#:
+#: ``VERIFIED_POSTED`` là bài đã hiện trong group. ``PENDING_GROUP_APPROVAL`` là
+#: bài đã gửi và đang chờ quản trị group duyệt: group đó vẫn đăng được, nhưng
+#: ở mức ưu tiên thấp và số bài chờ duyệt được kiểm soát.
+AUTO_POSTABLE_STATUSES = (VERIFIED_POSTED, PENDING_GROUP_APPROVAL)
 
 #: Những trạng thái chặn bộ xếp lịch.
 BLOCKING_STATUSES = (NOT_TESTED, TEST_IN_PROGRESS, SUBMITTED_UNVERIFIED, REJECTED,
@@ -110,10 +112,9 @@ def tone_of(status: str) -> str:
 def is_servable(status: str) -> bool:
     """Bộ xếp lịch có phục vụ cặp này không.
 
-    Chỉ ``VERIFIED_POSTED`` mới đủ: đó là bằng chứng bài đã thực sự xuất
-    hiện trong group. ``PENDING_GROUP_APPROVAL`` được ghi nhận đúng luồng chờ
-    duyệt nhưng bài đó chưa công khai, nên không được coi là đã đăng thành
-    công và không được tự đăng tiếp vào group đó.
+    Cả hai đều là bằng chứng thật: bài đã hiện trong group, hoặc đã được
+    Facebook tiếp nhận và đang chờ quản trị group duyệt. Thứ tự ưu tiên
+    giữa hai loại do phân loại quyết định, không phải ở đây.
     """
     return str(status or NOT_TESTED) in AUTO_POSTABLE_STATUSES
 

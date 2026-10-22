@@ -51,6 +51,7 @@ interface Settings {
   require_approval: boolean;
   apply_to_new_accounts: boolean;
   timezone: string;
+  max_pending_approvals: number;
 }
 
 interface Dashboard {
@@ -143,6 +144,7 @@ export function SharedAutoPostPanel({
         require_approval: settings.require_approval,
         apply_to_new_accounts: settings.apply_to_new_accounts,
         timezone: settings.timezone,
+        max_pending_approvals: settings.max_pending_approvals ?? 1,
       });
       push('Đã lưu cấu hình chung của Workspace', 'success');
       await load();
@@ -399,6 +401,16 @@ export function SharedAutoPostPanel({
                 max={500}
                 value={settings.pipeline_daily_limit}
                 onChange={(event) => update({ pipeline_daily_limit: Number(event.target.value) })}
+              />
+              <Input
+                label="Số bài chờ group duyệt được chạy cùng lúc"
+                name="auto_pending_approvals"
+                type="number"
+                min={0}
+                max={20}
+                value={settings.max_pending_approvals ?? 1}
+                onChange={(event) => update({ max_pending_approvals: Number(event.target.value) })}
+                hint="Group cần quản trị duyệt vẫn được xếp lịch, nhưng sau các group ưu tiên cao."
               />
               <Input
                 label="Múi giờ tính ngày"

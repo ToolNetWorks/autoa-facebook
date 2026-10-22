@@ -250,7 +250,7 @@ def plan_for_owner(conn, pipeline_id: int, settings: dict, moment: datetime | No
         for group in own_groups:
             if group["id"] in taken_groups:
                 continue
-            if group_daily_limit and _group_usage_today(conn, group["id"], day) >= group_daily_limit:
+            if group_daily_limit and _group_usage_today(conn, group["id"], day, moment) >= group_daily_limit:
                 continue
             available = group_cooldowns.next_available_at(conn, group["id"], moment_slot, 0)
             if available is None:
@@ -303,13 +303,18 @@ def plan_for_owner(conn, pipeline_id: int, settings: dict, moment: datetime | No
             "accounts": accounts, "quota": quotas}
 
 
-def _group_usage_today(conn, group_id: int, day: str) -> int:
-    """Số bài đã nhắm vào group này trong ngày, tính cả của CTV khác."""
+def _group_usage_today(conn, group_id: int, day: str, moment=None) -> int:
+    """Số bài đã nhắm vào group này trong ngày, tính cả của CTV khác.
+
+    Ngày theo múi giờ của Workspace, nên hai mốc UTC được dùng để so sánh.
+    """
+    start, end = time_windows.day_bounds_utc(moment or datetime.now().astimezone(), day)
     row = conn.execute("""SELECT COUNT(*) FROM auto_post_jobs
                            WHERE group_id=?
-                             AND date(COALESCE(scheduled_for, created_at))=date(?)
+                             AND datetime(COALESCE(scheduled_for, created_at)) >= datetime(?)
+                             AND datetime(COALESCE(scheduled_for, created_at)) < datetime(?)
                              AND status IN ('pending','approved','queued','published')""",
-                        (int(group_id), day)).fetchone()
+                        (int(group_id), start, end)).fetchone()
     return int(row[0] or 0)
 
 

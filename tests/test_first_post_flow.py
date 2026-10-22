@@ -173,8 +173,8 @@ def test_a_post_waiting_for_group_approval_is_recorded(client):
         status = group_verification.status_of(conn, pipeline, account, group)
         result = decision(conn, pipeline, account, group)
     assert status == group_verification.PENDING_GROUP_APPROVAL
-    # Bài chờ duyệt thì chưa công khai, nên không tự đăng tiếp vào group đó.
-    assert result['eligible'] is False
+    # Bài chờ duyệt thì chưa công khai, nhưng group vẫn dùng được ở mức
+    # ưu tiên thấp.
     assert result['decision'] == group_eligibility.WAITING_APPROVAL
 
 
@@ -455,3 +455,34 @@ def test_a_workspace_is_scheduled_by_one_configuration_only(client):
     with m.db() as conn:
         count = conn.execute("SELECT COUNT(*) FROM auto_post_jobs").fetchone()[0]
     assert count == 1, "Một Workspace chỉ được xếp lịch một lần"
+
+
+# --- 20. yêu cầu tham gia bị từ chối không phải hạn chế quyền đăng ---------
+
+def test_a_refused_join_request_is_not_a_posting_restriction(client):
+    """Bị từ chối tham gia không có nghĩa Facebook hạn chế quyền đăng."""
+    pipeline = make_pipeline(client, '@fl20')
+    account = make_account(client, pipeline, 'Facebook')
+    group = make_group(client, pipeline, account, 'Group',
+                       'https://www.facebook.com/groups/30022/')
+    with m.db() as conn:
+        group_membership.record(conn, pipeline, account, group,
+                                group_membership.JOIN_REJECTED)
+        result = decision(conn, pipeline, account, group)
+    assert result['eligible'] is False
+    assert result['status'] != group_verification.RESTRICTED_CONFIRMED
+    assert result['decision'] != group_eligibility.CONFIRMED_RESTRICTED
+    assert 'từ chối' in result['reason'].lower()
+
+
+def test_a_refused_join_request_does_not_change_the_verification_state(client):
+    """Trạng thái thành viên và bằng chứng đăng bài là hai thứ riêng biệt."""
+    pipeline = make_pipeline(client, '@fl20b')
+    account = make_account(client, pipeline, 'Facebook')
+    group = make_group(client, pipeline, account, 'Group',
+                       'https://www.facebook.com/groups/30023/')
+    with m.db() as conn:
+        group_membership.record(conn, pipeline, account, group,
+                                group_membership.JOIN_REJECTED)
+        assert group_verification.status_of(conn, pipeline, account, group) \
+            == group_verification.NOT_TESTED

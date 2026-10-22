@@ -200,33 +200,33 @@ export function GroupStatusList({
     );
   }
 
-  const decisionOrder = [
-    'first_post_ready',
-    'verified_ready',
-    'waiting_membership',
-    'waiting_approval',
-    'needs_action',
-    'confirmed_restricted',
-    'safety_blocked',
-  ];
-
   return (
     <Card
       title="Trạng thái group"
       description="Group chưa từng đăng vẫn được đưa vào lịch: bài đầu tiên chính là lần xác minh. Chỉ group đã xác minh mới được đăng tiếp."
     >
-      {Object.keys(counts).length > 0 ? (
-        <div className="stat-row" style={{ marginBottom: 'var(--sp-3)' }}>
-          {decisionOrder
-            .filter((key) => (counts[key] ?? 0) > 0)
-            .map((key) => (
-              <div className="stat" key={key}>
-                <span>{DECISION_LABEL[key] ?? key}</span>
-                <strong>{counts[key]}</strong>
-              </div>
-            ))}
+      <div className="stat-row" style={{ marginBottom: 'var(--sp-3)' }}>
+        <div className="stat">
+          <span>Group đã chọn</span>
+          <strong>{rows.length}</strong>
         </div>
-      ) : null}
+        <div className="stat">
+          <span>Sẵn sàng đăng bài đầu tiên</span>
+          <strong>{counts.first_post_ready ?? 0}</strong>
+        </div>
+        <div className="stat">
+          <span>Đã xác minh đăng</span>
+          <strong>{counts.verified_ready ?? 0}</strong>
+        </div>
+        <div className="stat">
+          <span>Chờ group duyệt</span>
+          <strong>{counts.waiting_approval ?? 0}</strong>
+        </div>
+        <div className="stat">
+          <span>Cần xử lý</span>
+          <strong>{(counts.needs_action ?? 0) + (counts.waiting_membership ?? 0)}</strong>
+        </div>
+      </div>
 
       {rows.length === 0 ? (
         <EmptyState title="Chưa chọn group nào" description="Chọn group ở phần cấu hình phía trên." />

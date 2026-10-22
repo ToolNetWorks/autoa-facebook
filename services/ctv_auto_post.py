@@ -21,6 +21,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from scheduler import time_windows
+
 LOG = logging.getLogger("facebook-pipeline.ctv-auto-post")
 
 TABLE = "ctv_auto_post_settings"
@@ -67,6 +69,7 @@ DEFAULT_SETTINGS = {
     "approval_required": True,
     "anti_duplicate": True,
     "apply_to_new_accounts": True,
+    "max_pending_approvals": 1,
 }
 
 BOOL_FIELDS = ("enabled", "ai_caption_enabled", "approval_required", "anti_duplicate",
@@ -409,8 +412,9 @@ def save_settings(conn, pipeline_id: int, ctv_user_id: int, data: dict) -> dict:
         (pipeline_id,ctv_user_id,enabled,account_scope,selected_account_ids_json,
          selected_group_ids_json,topic,caption_template,max_posts_per_account_daily,
          start_time,end_time,timezone,schedule_rules_json,ai_caption_enabled,
-         approval_required,anti_duplicate,apply_to_new_accounts,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         approval_required,anti_duplicate,apply_to_new_accounts,max_pending_approvals,
+         created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(pipeline_id) DO UPDATE SET
             ctv_user_id=excluded.ctv_user_id,
             enabled=excluded.enabled, account_scope=excluded.account_scope,
@@ -424,6 +428,7 @@ def save_settings(conn, pipeline_id: int, ctv_user_id: int, data: dict) -> dict:
             approval_required=excluded.approval_required,
             anti_duplicate=excluded.anti_duplicate,
             apply_to_new_accounts=excluded.apply_to_new_accounts,
+            max_pending_approvals=excluded.max_pending_approvals,
             updated_at=excluded.updated_at""",
                  (int(pipeline_id), int(ctv_user_id),
                   int(bool(merged["enabled"])), merged["account_scope"],
@@ -438,6 +443,7 @@ def save_settings(conn, pipeline_id: int, ctv_user_id: int, data: dict) -> dict:
                   int(bool(merged["approval_required"])),
                   int(bool(merged["anti_duplicate"])),
                   int(bool(merged["apply_to_new_accounts"])),
+                  int(max(0, int(merged.get("max_pending_approvals") or 0))),
                   stamp, stamp))
     return settings_of(conn, pipeline_id, ctv_user_id) or defaults_for(pipeline_id, ctv_user_id)
 
@@ -471,11 +477,18 @@ def jobs_of(conn, pipeline_id: int, ctv_user_id: int, limit: int = 50) -> list[d
     return [dict(row) for row in rows]
 
 
-def usage_of(conn, pipeline_id: int, ctv_user_id: int, account_id: int, day: str) -> int:
-    """Số bài một CTV đã tạo cho một Facebook trong ngày."""
+def usage_of(conn, pipeline_id: int, ctv_user_id: int, account_id: int, day: str,
+             moment=None) -> int:
+    """Số bài một CTV đã tạo cho một Facebook trong ngày.
+
+    Ngày theo múi giờ của Workspace, nên hai mốc UTC được dùng để so sánh.
+    """
+    start, end = time_windows.day_bounds_utc(moment or datetime.now().astimezone(), day)
     row = conn.execute("""SELECT COUNT(*) FROM auto_post_jobs
                            WHERE pipeline_id=? AND created_by_ctv_id=? AND account_id=?
-                             AND date(COALESCE(scheduled_for, created_at))=date(?)
+                             AND datetime(COALESCE(scheduled_for, created_at)) >= datetime(?)
+                             AND datetime(COALESCE(scheduled_for, created_at)) < datetime(?)
                              AND status IN ('pending','approved','queued','published')""",
-                        (int(pipeline_id), int(ctv_user_id), int(account_id), day)).fetchone()
+                        (int(pipeline_id), int(ctv_user_id), int(account_id),
+                         start, end)).fetchone()
     return int(row[0] or 0)

@@ -65,6 +65,7 @@ from services import media_cloud
 from api import ctv_auto_post as ctv_auto_post_api
 from api import media as media_api
 from api import groups as groups_api
+from api import group_posts as group_posts_api
 from api import verification as verification_api
 from services.media_fingerprint import file_sha256, hamming_distance, perceptual_signature
 from services.media_probe import ReelPolicy
@@ -75,6 +76,7 @@ from services.video_precheck import (
 from services import group_screening
 from services import group_verification
 from services import group_membership
+from services import group_classification
 from services import group_eligibility
 from services import group_targets
 from services import group_join_worker
@@ -777,6 +779,61 @@ def init_db():
     migrate_v12_screening_classification()
     migrate_v13_post_verification()
     migrate_v14_workspace_config()
+    migrate_v15_group_classification()
+    migrate_v16_pending_approval_limit()
+    migrate_v17_campaign_idempotency()
+
+
+def migrate_v17_campaign_idempotency():
+    """V17: khoá idempotency cho job cua chien dich.
+
+    Mot chien dich tao nhieu job, nen can mot khoa de goi lai cung chien dich
+    khong tao trung job. Cot moi nen khong co du lieu nao bi mat.
+    """
+    with db() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "idempotency_key" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN idempotency_key TEXT")
+            conn.execute("""CREATE INDEX IF NOT EXISTS idx_jobs_idempotency
+                            ON jobs(pipeline_id, idempotency_key)""")
+
+
+def migrate_v16_pending_approval_limit():
+    """V16: giới hạn số bài chờ quản trị group duyệt được chạy cùng lúc."""
+    with db() as conn:
+        for table in ("pipeline_auto_post_settings", "ctv_auto_post_settings"):
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if "max_pending_approvals" not in columns:
+                conn.execute(f"""ALTER TABLE {table} ADD COLUMN max_pending_approvals INTEGER
+                                  NOT NULL DEFAULT 1""")
+
+
+def migrate_v15_group_classification():
+    """V15: phân loại group và khả năng đăng, tách khỏi bằng chứng.
+
+    Bảng mới nên không có dữ liệu nào bị mất. Phân loại của các cặp đã có
+    bằng chứng đăng bài được dựng lại từ chính bằng chứng đó, không suy đoán.
+    """
+    with db() as conn:
+        group_classification.ensure_schema(conn)
+        rows = conn.execute("""SELECT r.pipeline_id, r.account_id, r.group_id, r.verification_status,
+                                     r.evidence_reference, g.requires_approval
+                              FROM group_post_verifications r
+                              JOIN groups g ON g.id=r.group_id""").fetchall()
+        for row in rows:
+            evidence = {}
+            screening = conn.execute("""SELECT evidence_json FROM group_screening_results
+                                        WHERE account_id=? AND group_id=?""",
+                                     (row["account_id"], row["group_id"])).fetchone()
+            if screening is not None:
+                try:
+                    evidence = json.loads(screening["evidence_json"] or "{}")
+                except (TypeError, ValueError):
+                    evidence = {}
+            group_classification.record_outcome(
+                conn, row["pipeline_id"], row["account_id"], row["group_id"],
+                row["verification_status"], group_requires_approval=bool(row["requires_approval"]),
+                evidence=evidence, evidence_reference=str(row["evidence_reference"] or ""))
 
 
 def migrate_v14_workspace_config():
@@ -1643,18 +1700,12 @@ class GroupPreviewCheck(BaseModel):
     nickname: str = Field(default="", max_length=120)
 
 
-class GroupPostCreate(BaseModel):
-    group_ids: list[int] = Field(min_length=1, max_length=50)
-    body: str = Field(min_length=1, max_length=20000)
-    media: list[str] = Field(min_length=1, max_length=4)
-    scheduled_at: str
-    ai_record_id: int | None = None
-
-
 class PostCreate(BaseModel):
     pipeline_id: int
     body: str = Field(min_length=1, max_length=20000)
-    group_ids: list[int] = Field(min_length=1, max_length=50)
+    # So group cua mot chien dich duoc gioi han theo cau hinh, khong phai hang so
+    # co dinh trong ma nguon.
+    group_ids: list[int] = Field(min_length=1)
     media: list[str] = Field(min_length=1, max_length=4)
     anonymous_only: bool = True
     scheduled_at: str
@@ -1680,7 +1731,10 @@ class ManualTaskUpdate(BaseModel):
 
 
 class EnabledUpdate(BaseModel):
-    enabled: bool
+    enabled: bool | None = None
+    account_id: int | None = None
+    posting_mode: str | None = None
+    nickname: str | None = None
 
 
 class JobReview(BaseModel):
@@ -2941,6 +2995,8 @@ def prepare_verification_post(conn, pipeline_id: int, account_id: int, group_id:
     if picture is None:
         raise HTTPException(409, "Album chưa có ảnh đã kiểm tra để dùng cho bài xác minh")
     return {"body": "Bài kiểm tra quyền đăng của nhóm.",
+            "media_description": picture["description"] or "",
+            "tags": [],
             "media": [picture["storage_key"]],
             "media_name": picture["description"] or "",
             "media_id": picture["id"],
@@ -2956,9 +3012,17 @@ def create_verification_post(conn, pipeline_id: int, account_id: int, group_id: 
     Chỉ gọi sau khi CTV đã xem trước và xác nhận.
     """
     draft = prepare_verification_post(conn, pipeline_id, account_id, group_id)
-    body = draft["body"]
     mode = draft["posting_mode"]
     nickname = draft["nickname"]
+    # Caption theo AI Profile của Workspace, giống luồng đăng tự động.
+    settings = posting_limits.settings_of(conn, pipeline_id)
+    caption_result = build_caption(draft.get("media_description", ""),
+                                   list(draft.get("tags") or []),
+                                   settings.get("topic") or "sản phẩm",
+                                   load_ai_config())
+    body = caption_result.get("caption") or draft["body"]
+    if caption_result.get("status") == "blocked":
+        raise HTTPException(409, "Nội dung bị chặn bởi bộ kiểm tra an toàn")
     media_path = stage_album_media(conn, pipeline_id, draft["picture"])
     cursor = conn.execute("""INSERT INTO posts(pipeline_id,body,media_json,created_at,anonymous_only)
                              VALUES(?,?,?,?,1)""",
@@ -3010,7 +3074,7 @@ def group_join_worker_thread() -> None:
 
 
 def refresh_screening_for_job(conn, job_id: int) -> None:
-    """Reclassify a group after a posting job changed its outcome."""
+    """Cập nhật bằng chứng, phân loại và quan sát sau khi kết quả bài đổi."""
     job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     if job is None:
         return
@@ -3029,6 +3093,24 @@ def refresh_screening_for_job(conn, job_id: int) -> None:
                  "group_name": stored.get("group_name", ""),
                  "details": stored.get("check_details", "")}
     store_screening_result(conn, job["pipeline_id"], job["account_id"], job["group_id"], check)
+    # Phân loại được học từ kết quả đăng bài thật của chính cặp này.
+    verification = group_verification.row_of(conn, job["pipeline_id"], job["account_id"],
+                                            job["group_id"])
+    if verification is None:
+        return
+    group_row = conn.execute("SELECT requires_approval FROM groups WHERE id=?",
+                             (job["group_id"],)).fetchone()
+    group_requires_approval = bool(group_row["requires_approval"]) if group_row else False
+    evidence = {}
+    if row is not None:
+        try:
+            evidence = json.loads(row["evidence_json"] or "{}")
+        except (TypeError, ValueError):
+            evidence = {}
+    group_classification.record_outcome(
+        conn, job["pipeline_id"], job["account_id"], job["group_id"],
+        verification["verification_status"], group_requires_approval=group_requires_approval,
+        evidence=evidence, evidence_reference=str(verification["evidence_reference"] or ""))
 
 
 def enqueue_screening(conn, pipeline_id: int, account_id: int, group_id: int, force: bool) -> bool:
@@ -3125,6 +3207,27 @@ def screening_worker():
         except Exception as error:
             LOG.warning("Screening worker error: %s", type(error).__name__)
             STOP_EVENT.wait(5)
+
+
+# Chiến dịch đăng group nằm ở module riêng: một bài, nhiều job, mỗi job
+# một group, và mọi kiểm tra diễn ra trước khi ảnh được dàn.
+app.include_router(group_posts_api.build_router(group_posts_api.Deps(
+    db=db,
+    require_principal=require_principal,
+    require_permission=require_permission,
+    scope_pipeline=scope_pipeline,
+    scoped_entry=scoped_entry,
+    entry=entry,
+    audit=audit,
+    group_config=group_config,
+    resource_owner=resource_owner,
+    usable_caption=usable_caption,
+    parse_date=parse_date,
+    media_file=media_file,
+    uploads_root=lambda: UPLOADS,
+    data_root=lambda: DATA,
+    iso=iso,
+)))
 
 
 # Xác minh quyền đăng và tự động tham gia group nằm ở module riêng.
@@ -3568,8 +3671,8 @@ def save_auto_post_settings(conn, pipeline_id: int, data: dict) -> dict:
     conn.execute("""INSERT INTO pipeline_auto_post_settings
         (pipeline_id,enabled,scope,account_ids_json,group_ids_json,daily_limit_per_account,
          min_gap_minutes,pipeline_daily_limit,topic,ai_caption,anti_duplicate,require_approval,
-         apply_to_new_accounts,timezone,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         apply_to_new_accounts,timezone,max_pending_approvals,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(pipeline_id) DO UPDATE SET
             enabled=excluded.enabled, scope=excluded.scope,
             account_ids_json=excluded.account_ids_json, group_ids_json=excluded.group_ids_json,
@@ -3578,6 +3681,7 @@ def save_auto_post_settings(conn, pipeline_id: int, data: dict) -> dict:
             topic=excluded.topic, ai_caption=excluded.ai_caption,
             anti_duplicate=excluded.anti_duplicate, require_approval=excluded.require_approval,
             apply_to_new_accounts=excluded.apply_to_new_accounts, timezone=excluded.timezone,
+            max_pending_approvals=excluded.max_pending_approvals,
             updated_at=excluded.updated_at""",
                  (int(pipeline_id), int(bool(merged.get("enabled"))), merged.get("scope", "all"),
                   json.dumps([int(value) for value in merged.get("account_ids") or []]),
@@ -3585,10 +3689,13 @@ def save_auto_post_settings(conn, pipeline_id: int, data: dict) -> dict:
                   int(merged.get("daily_limit_per_account") or 3),
                   int(merged.get("min_gap_minutes") or 60),
                   int(merged.get("pipeline_daily_limit") or 0), merged.get("topic", ""),
-                  int(bool(merged.get("ai_caption", True))), int(bool(merged.get("anti_duplicate", True))),
+                  int(bool(merged.get("ai_caption", True))),
+                  int(bool(merged.get("anti_duplicate", True))),
                   int(bool(merged.get("require_approval", True))),
                   int(bool(merged.get("apply_to_new_accounts", True))),
-                  merged.get("timezone") or "Asia/Ho_Chi_Minh", iso(), iso()))
+                  merged.get("timezone") or "Asia/Ho_Chi_Minh",
+                  int(max(0, int(merged.get("max_pending_approvals") or 0))),
+                  iso(), iso()))
     return posting_limits.settings_of(conn, pipeline_id)
 
 
@@ -3606,6 +3713,7 @@ class AutoPostSettings(BaseModel):
     require_approval: bool | None = None
     apply_to_new_accounts: bool | None = None
     timezone: str | None = None
+    max_pending_approvals: int | None = None
 
 
 class AccountLimit(BaseModel):
@@ -4549,7 +4657,28 @@ def pipeline_groups(pipeline_id: int, principal: Principal = Depends(require_pri
         rows = conn.execute(f"""SELECT g.*, a.label account_label FROM groups g
                                LEFT JOIN accounts a ON a.id=g.account_id
                                WHERE {condition} ORDER BY g.id DESC""", params).fetchall()
-        return [group_payload(conn, row, principal) for row in rows]
+        items = [group_payload(conn, row, principal) for row in rows]
+        # Phân loại, khả năng đăng và chế độ đã chọn, theo đúng từng cặp
+        # Facebook–Group.
+        classifications = group_classification.pairs_of(conn, pipeline_id)
+        for item in items:
+            account_id = int(item.get("account_id") or 0)
+            entry = classifications.get((account_id, int(item.get("id") or 0)))
+            if entry is None:
+                entry = group_classification.classification_of(conn, pipeline_id, account_id,
+                                                              int(item.get("id") or 0))
+            item["classification"] = entry["classification"]
+            item["classification_label"] = entry["label"]
+            item["classification_tone"] = entry["tone"]
+            item["priority"] = entry["priority"]
+            item["priority_rank"] = entry["priority_rank"]
+            item["supports_anonymous"] = entry["supports_anonymous"]
+            item["supports_nickname"] = entry["supports_nickname"]
+            item["capability_state"] = entry["capability_state"]
+            item["last_verified_at"] = entry.get("last_verified_at")
+            item["last_post_status"] = entry.get("last_post_status", "")
+            item["selected_posting_mode"] = item.get("posting_mode") or "anonymous"
+        return items
 
 
 @app.post("/api/pipelines/{pipeline_id}/groups", status_code=201)
@@ -4878,75 +5007,6 @@ def check_pipeline_group(pipeline_id: int, group_id: int, principal: Principal =
             "last_checked_at": iso()}
 
 
-@app.post("/api/pipelines/{pipeline_id}/group-posts", status_code=201)
-def create_group_post(pipeline_id: int, data: GroupPostCreate, principal: Principal = Depends(require_principal)):
-    """Schedule one post for every chosen group, each with its own identity."""
-    require_permission(principal, "group_posts.create")
-    scope_pipeline(principal, pipeline_id)
-    scheduled = parse_date(data.scheduled_at)
-    if len(set(data.group_ids)) != len(data.group_ids):
-        raise HTTPException(422, "Có group bị lặp trong yêu cầu")
-    media_paths = []
-    with db() as conn:
-        for filename in data.media:
-            try:
-                media_file(conn, filename, principal)
-            except HTTPException as error:
-                raise HTTPException(422, "Ảnh không hợp lệ") from error
-            media_paths.append(filename)
-        ai_caption, ai_record = usable_caption(conn, pipeline_id, data.ai_record_id)
-        caption = ai_caption or data.body
-        may_publish = principal.can("group_posts.publish")
-        result = conn.execute("""INSERT INTO posts(pipeline_id,body,media_json,created_at,anonymous_only,ai_record_id,owner_user_id)
-                                 VALUES(?,?,?,?,1,?,?)""",
-                                (pipeline_id, caption, json.dumps(media_paths), iso(), ai_record,
-                                 resource_owner(principal)))
-        post_id = result.lastrowid
-        analytics_worker.sync_attribution(conn, "group_post", post_id,
-                                          created_by=resource_owner(principal))
-        created, skipped = [], []
-        for group_id in data.group_ids:
-            group = scoped_entry(conn, "groups", group_id, principal)
-            if group["pipeline_id"] != pipeline_id:
-                raise HTTPException(404, "Not found")
-            config = group_config(conn, group_id, principal)
-            if not config["account_id"]:
-                skipped.append({"group_id": group_id, "reason": "Group chưa gán tài khoản Facebook"})
-                continue
-            account = scoped_entry(conn, "accounts", config["account_id"], principal)
-            if account["pipeline_id"] != pipeline_id:
-                raise HTTPException(404, "Not found")
-            if not account["enabled"] or group["status"] != "active" or not group["enabled"]:
-                skipped.append({"group_id": group_id, "reason": "Group hoặc tài khoản đang tạm dừng"})
-                continue
-            duplicate = conn.execute("""SELECT COUNT(*) FROM jobs WHERE group_id=? AND account_id=?
-                                        AND state IN ('queued','running')""",
-                                     (group_id, config["account_id"])).fetchone()[0]
-            if duplicate:
-                skipped.append({"group_id": group_id, "reason": "Đã có bài đang chờ cho group này"})
-                continue
-            state = "queued" if may_publish else "pending_approval"
-            details = "" if may_publish else "Bài nháp: CTV chưa có quyền đăng, cần Chủ hệ thống duyệt"
-            if group["screening_status"] not in ("priority", "review"):
-                details = (details + " " if details else "") + \
-                    "Group chưa được xác minh, bài sẽ chờ cho tới khi kiểm tra xong."
-            if data.ai_record_id and not ai_caption:
-                state = "pending_approval"
-                details = "Caption AI chưa được duyệt hoặc bị chặn, bài chờ người duyệt"
-            cursor = conn.execute("""INSERT INTO jobs
-                (post_id,group_id,account_id,pipeline_id,state,details,scheduled_at,updated_at,
-                 requested_posting_mode,requested_nickname,posting_status,verification_status)
-                VALUES(?,?,?,?,?,?,?,?,?,?,'pending','unverified')""",
-                (post_id, group_id, config["account_id"], pipeline_id, state, details,
-                 iso(scheduled), iso(), config["posting_mode"], config["nickname"]))
-            created.append({"job_id": cursor.lastrowid, "group_id": group_id,
-                            "account_id": config["account_id"],
-                            "posting_mode": config["posting_mode"], "nickname": config["nickname"]})
-    audit("post", post_id, f"Lên lịch cho {len(created)} group, bỏ qua {len(skipped)}", pipeline_id)
-    return {"ok": True, "post_id": post_id, "jobs_created": len(created), "jobs": created,
-            "skipped": skipped, "published": may_publish and not (data.ai_record_id and not ai_caption)}
-
-
 @app.get("/api/groups")
 def groups(pipeline_id: int | None = None, principal: Principal = Depends(require_principal)):
     """The groups of one workspace.
@@ -4998,12 +5058,40 @@ def create_group(data: GroupCreate, principal: Principal = Depends(require_princ
 
 @app.patch("/api/groups/{group_id}")
 def patch_group(group_id: int, data: EnabledUpdate, principal: Principal = Depends(require_principal)):
+    """Bật/tắt group, và chọn tài khoản cùng chế độ đăng cho group đó."""
     with db() as conn:
         group = scoped_entry(conn, "groups", group_id, principal)
     require_permission(principal, "groups.manage")
+    changes = []
     with db() as conn:
-        conn.execute("UPDATE groups SET enabled=? WHERE id=?", (int(data.enabled), group_id))
-    audit("group", group_id, "Tắt/bật nhóm", group["pipeline_id"])
+        if data.enabled is not None:
+            conn.execute("UPDATE groups SET enabled=? WHERE id=?", (int(data.enabled), group_id))
+            changes.append("bật/tắt")
+        if data.account_id is not None:
+            account = scoped_entry(conn, "accounts", int(data.account_id), principal)
+            if account["pipeline_id"] != group["pipeline_id"]:
+                raise HTTPException(404, "Not found")
+            conn.execute("UPDATE groups SET account_id=? WHERE id=?",
+                         (int(data.account_id), group_id))
+            upsert_group_account(conn, group["pipeline_id"], group_id, int(data.account_id),
+                                 group["posting_mode"] or "anonymous", group["nickname"] or "")
+            changes.append("đổi tài khoản")
+        if data.posting_mode is not None:
+            mode = str(data.posting_mode)
+            if mode not in (MODE_ANONYMOUS, MODE_NICKNAME):
+                raise HTTPException(422, "Chế độ đăng không hợp lệ")
+            conn.execute("UPDATE groups SET posting_mode=? WHERE id=?", (mode, group_id))
+            upsert_group_account(conn, group["pipeline_id"], group_id, group["account_id"],
+                                 mode, data.nickname if data.nickname is not None
+                                 else (group["nickname"] or ""))
+            changes.append("đổi chế độ đăng")
+        elif data.nickname is not None:
+            conn.execute("UPDATE groups SET nickname=? WHERE id=?", (data.nickname, group_id))
+            upsert_group_account(conn, group["pipeline_id"], group_id, group["account_id"],
+                                 group["posting_mode"] or "anonymous", data.nickname)
+            changes.append("đổi biệt danh")
+    if changes:
+        audit("group", group_id, ", ".join(changes), group["pipeline_id"])
     return {"ok": True}
 
 
@@ -5361,9 +5449,11 @@ def claim_next_job():
               AND p.pipeline_id=g.pipeline_id AND p.pipeline_id=a.pipeline_id
               AND (j.pipeline_id IS NULL OR j.pipeline_id=p.pipeline_id)
               AND (j.is_verification=1
-                   OR g.screening_status IN ('verified_posted','pending_group_approval'))
+                   OR g.screening_status NOT IN ('restricted_confirmed','rejected'))
               AND g.manual_review=0
-            ORDER BY (CASE g.screening_status WHEN 'verified_posted' THEN 0 ELSE 1 END),
+            ORDER BY (CASE g.screening_status WHEN 'verified_posted' THEN 0
+                                               WHEN 'pending_group_approval' THEN 1
+                                               ELSE 2 END),
                      j.scheduled_at, j.id LIMIT 1""", (iso(),)).fetchone()
         if not row:
             return None
@@ -5447,6 +5537,13 @@ def job_ownership_ok(job_id: int) -> bool:
     return len(owners) == 1
 
 
+def _needs_login(details: str) -> bool:
+    """True when Facebook asked the account to log in again."""
+    text = str(details or "").lower()
+    return ("login or checkpoint" in text or "yêu cầu đăng nhập" in text
+            or "màn hình đăng nhập" in text or "checkpoint" in text)
+
+
 def execute_job(job: dict):
     if not job_ownership_ok(job["id"]):
         with db() as conn:
@@ -5500,6 +5597,11 @@ def execute_job(job: dict):
                       iso(), identity, verification, posting_status,
                       str(result.get("details", ""))[:500] if status in ("failed", "needs_review") else "",
                       permalink, published_at, job["id"]))
+        # Facebook yêu cầu đăng nhập: ghi lại phiên đã hết hạn, để bộ xếp
+        # lịch không thử lại vô ích và CTV biết phải đăng nhập lại.
+        if _needs_login(result.get("details", "")):
+            conn.execute("UPDATE accounts SET session_status='expired', updated_at=? WHERE id=?",
+                         (iso(), job["account_id"]))
         analytics_worker.sync_attribution(conn, "group_post", job["post_id"],
                                           published_by=job.get("account_id"))
         settings = posting_limits.settings_of(conn, job["pipeline_id"])
