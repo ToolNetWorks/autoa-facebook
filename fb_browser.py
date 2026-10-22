@@ -1361,41 +1361,6 @@ async def dismiss_common_popups(page) -> bool:
     return closed
 
 
-#: Thông báo Facebook dùng khi bài đã đăng công khai.
-PUBLISHED_NOTICES = (
-    "text=Your post is now published",
-    "text=Bài viết của bạn hiện đã được đăng",
-    "text=Đã đăng bài viết của bạn",
-    "text=Post published",
-)
-#: Thông báo Facebook dùng khi bài đang chờ quản trị group duyệt.
-PENDING_NOTICES = (
-    "text=Sent for approval",
-    "text=Đã gửi để phê duyệt",
-    "text=Đang chờ quản trị viên duyệt",
-    "text=Đang chờ duyệt",
-    "text=Đã gửi để duyệt",
-)
-#: Thông báo Facebook dùng khi bài bị từ chối.
-REJECTED_NOTICES = (
-    "text=You can't post in this group",
-    "text=Bạn không thể đăng bài trong nhóm này",
-    "text=Your post was rejected",
-    "text=Bài viết của bạn đã bị từ chối",
-)
-
-
-async def _first_notice_visible(page, notices) -> bool:
-    for selector in notices:
-        try:
-            target = page.locator(selector).first
-            await target.wait_for(state="visible", timeout=2500)
-            return True
-        except Exception:
-            continue
-    return False
-
-
 async def describe_composer(page) -> str:
     """Mô tả ngắn các nút đang hiện trong composer, để đọc lỗi dễ hơn."""
     try:
@@ -1413,47 +1378,6 @@ async def describe_composer(page) -> str:
         return ", ".join(labels)[:400]
     except Exception:
         return ""
-
-
-async def wait_post_outcome(page, body: str = "") -> dict:
-    """Quan sát kết quả thật sau khi bấm Đăng.
-
-    Ba kết quả khác nhau, và không kết quả nào được rút ra từ việc đã bấm
-    nút:
-
-    * ``published`` — Facebook xác nhận bài đã đăng.
-    * ``pending_approval`` — Facebook xác nhận bài đang chờ quản trị group
-      duyệt.
-    * ``ambiguous`` — không xác nhận được. Bài này **không** được gửi lại,
-      vì có thể đã đăng rồi.
-    """
-    outcome = {"state": "ambiguous", "details": "", "permalink": ""}
-    try:
-        if await _first_notice_visible(page, REJECTED_NOTICES):
-            outcome["state"] = "rejected"
-            outcome["details"] = "Facebook từ chối bài đăng trong group này."
-            return outcome
-        if await _first_notice_visible(page, PENDING_NOTICES):
-            outcome["state"] = "pending_approval"
-            outcome["details"] = "Facebook đã nhận bài và đang chờ quản trị group duyệt."
-            return outcome
-        if await _first_notice_visible(page, PUBLISHED_NOTICES):
-            outcome["state"] = "published"
-            outcome["details"] = "Facebook xác nhận bài đã đăng."
-            return outcome
-    except Exception:
-        pass
-    # Hộp thoại composer đóng lại KHÔNG tự động nghĩa là bài đã đăng.
-    # Dialog có thể đóng do lỗi, hủy, mạng, v.v. Chỉ ghi ambiguous.
-    try:
-        dialog = page.get_by_role("dialog").last
-        await dialog.wait_for(state="hidden", timeout=12000)
-        outcome["details"] = ("Hộp thoại tạo bài đã đóng nhưng không có thông báo xác nhận; "
-                              "kết quả không xác định, không tự gửi lại.")
-    except Exception:
-        outcome["details"] = ("Không xác nhận được kết quả sau khi bấm Đăng; "
-                              "không tự gửi lại để tránh đăng trùng.")
-    return outcome
 
 
 async def attempt_engagement(data: dict):
