@@ -149,10 +149,6 @@ def plan_post(groups: list[dict], candidates: list[dict], topic: str, provider_c
     plan["caption_source"] = caption_result["source"]
     for group in groups:
         mode = group.get("posting_mode") or MODE_ANONYMOUS
-        if mode == MODE_NICKNAME and not (group.get("nickname") or "").strip():
-            plan["posts"].append({"group_id": group.get("id"), "group_name": group.get("label"),
-                                  "posting_mode": mode, "skipped": "Chưa cấu hình biệt danh"})
-            continue
         if caption_result["status"] == "blocked":
             plan["posts"].append({"group_id": group.get("id"), "group_name": group.get("label"),
                                   "posting_mode": mode, "skipped": "Caption bị chặn vì nội dung rủi ro"})

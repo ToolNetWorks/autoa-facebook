@@ -308,6 +308,23 @@ async def select_nickname_from_facebook_suggestions(page: Page) -> tuple[str, li
     # (có thể là biệt danh đã được Facebook cấp trước đó)
     return "", names
 
+async def save_facebook_nickname_async(pipeline_id: int, account_id: int, group_id: int,
+                                        nickname: str, status: str = "confirmed") -> None:
+    """Lưu biệt danh Facebook đã xác nhận (async version cho fb_browser.py)."""
+    import sqlite3
+    from datetime import datetime, timezone
+    conn = sqlite3.connect("data/manager.sqlite3")
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""UPDATE group_accounts SET
+            facebook_nickname=?, nickname_status=?, confirmed_at=?, last_verified_at=?, updated_at=?
+            WHERE pipeline_id=? AND account_id=? AND group_id=?""",
+            (nickname, status, now, now, now, pipeline_id, account_id, group_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 async def require_nickname_identity(page: Page, pipeline_id: int, account_id: int, group_id: int,
                                      configured_nickname: str) -> tuple[str, list[str], str]:
     """Chọn biệt danh cho việc đăng bài.
@@ -370,55 +387,12 @@ async def require_nickname_identity(page: Page, pipeline_id: int, account_id: in
         
         if await identity_shown(page, chosen):
             # Lưu biệt danh mới vào database
-            import sqlite3
-            from datetime import datetime, timezone
-            conn = sqlite3.connect("data/manager.sqlite3")
-            try:
-                now = datetime.now(timezone.utc).isoformat()
-                conn.execute("""UPDATE group_accounts SET
-                    facebook_nickname=?, nickname_status=?, confirmed_at=?, last_verified_at=?, updated_at=?
-                    WHERE pipeline_id=? AND account_id=? AND group_id=?""",
-                    (chosen, "confirmed", now, now, now, pipeline_id, account_id, group_id))
-                conn.commit()
-            finally:
-                conn.close()
+            await save_facebook_nickname_async(pipeline_id, account_id, group_id, chosen, "confirmed")
             return chosen, names, "facebook_suggested"
         return "", names, "facebook_suggested"
     
     # Không có biệt danh do Facebook đề xuất
     return "", names, "not_found"
-
-async def enforce_posting_identity(page: Page, pipeline_id: int, account_id: int, group_id: int,
-                                   mode: str, configured_nickname: str) -> tuple[str, str, str]:
-    """Chọn biệt danh đã cấu hình. Trả về (tên đã chọn, danh sách tên có sẵn).
-
-    Trả về ("", []) nếu không chọn được. Không bao giờ dùng tên thật làm
-    thay thế.
-    """
-    wanted = (nickname or "").strip()
-    if not wanted:
-        return "", []
-    menu = await open_identity_menu(page)
-    if menu is None:
-        return "", []
-    names = await identity_names(menu)
-    chosen = next((name for name in names if same_identity(name, wanted)), "")
-    if not chosen:
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-        return "", names
-    try:
-        item = menu.get_by_text(re.compile(rf"^{re.escape(chosen)}$", re.I)).first
-        await item.click(timeout=5000)
-        await page.wait_for_timeout(1200)
-    except Exception:
-        return "", names
-    if not await identity_shown(page, chosen):
-        return "", names
-    return chosen, names
-
 
 async def enforce_posting_identity(page: Page, pipeline_id: int, account_id: int, group_id: int,
                                    mode: str, configured_nickname: str) -> tuple[str, str, str]:

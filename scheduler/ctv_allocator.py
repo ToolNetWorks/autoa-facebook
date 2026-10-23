@@ -22,6 +22,7 @@ from scheduler import account_limits, group_cooldowns, time_windows
 from services import ai_provider, ctv_auto_post, duplicate_guard
 from services import group_eligibility
 from services.auto_posting import create_caption
+from services.destination_lock import DestinationLockService
 from services.image_selection import select_media
 
 LOG = logging.getLogger("facebook-pipeline.ctv-allocator")
@@ -279,6 +280,13 @@ def plan_for_owner(conn, pipeline_id: int, settings: dict, moment: datetime | No
         if caption_result.get("status") == "blocked":
             notes.append("Caption bị chặn vì nội dung rủi ro")
             continue
+        # Apply Destination Lock if configured for this pipeline
+        lock_service = DestinationLockService()
+        caption_with_lock, was_locked, lock_msg = lock_service.apply_destination_lock(
+            caption_result.get("caption", ""), pipeline_id)
+        if was_locked:
+            caption_result["caption"] = caption_with_lock
+            caption_result.setdefault("reasons", []).append(f"Destination Lock: {lock_msg}")
         verdict = duplicate_guard.check(conn, pipeline_id, picture,
                                         caption_result.get("caption", ""),
                                         chosen_group["id"], account_id)

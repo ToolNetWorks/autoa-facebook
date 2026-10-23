@@ -27,6 +27,7 @@ from services.posting_mode import (enforce_posting_identity, require_anonymous_m
                                    require_nickname_identity)
 from services.retry_policy import (AmbiguousPublishStateError, RetryPolicy,
                                    classify_error, run_with_bounded_retry)
+from services.destination_lock import DestinationLockService
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.getenv("DATA_DIR", str(ROOT / "data"))).resolve()
@@ -1031,6 +1032,47 @@ async def attempt_post(data: dict):
                     return result("needs_review",
                                   "Chế độ ẩn danh mất trước khi gửi; không đăng bài",
                                   evidence_name, actual_identity, "not_verified")
+
+            # Final Destination Lock validation before Submit
+            pipeline_id = data.get("pipeline_id")
+            if pipeline_id is not None:
+                lock_service = DestinationLockService()
+                # Read the current caption from the editor
+                try:
+                    current_caption = await editor.inner_text()
+                except Exception:
+                    current_caption = str(data.get("body") or "")
+                
+                is_valid, validation_msg = lock_service.validate_caption_with_lock(current_caption, pipeline_id)
+                if not is_valid:
+                    # Try to apply the lock to the editor
+                    try:
+                        locked_caption, was_modified, lock_msg = lock_service.apply_destination_lock(current_caption, pipeline_id)
+                        if was_modified:
+                            await editor.fill(locked_caption, timeout=10000)
+                            await page.wait_for_timeout(500)
+                            # Re-validate
+                            is_valid, validation_msg = lock_service.validate_caption_with_lock(locked_caption, pipeline_id)
+                            if not is_valid:
+                                logger.emit("post_needs_review", job_id=job_id,
+                                            reason="destination_lock_failed", run_id=run_id)
+                                return result("needs_review",
+                                              f"Không thể áp dụng Destination Lock: {validation_msg}",
+                                              evidence_name, actual_identity, "not_verified")
+                        else:
+                            # Lock is enabled but couldn't be applied
+                            logger.emit("post_needs_review", job_id=job_id,
+                                        reason="destination_lock_failed", run_id=run_id)
+                            return result("needs_review",
+                                          f"Destination Lock bắt buộc nhưng không thể áp dụng: {validation_msg}",
+                                          evidence_name, actual_identity, "not_verified")
+                    except Exception as e:
+                        logger.emit("post_needs_review", job_id=job_id,
+                                    reason="destination_lock_error", run_id=run_id)
+                        return result("needs_review",
+                                      f"Lỗi Destination Lock: {e}",
+                                      evidence_name, actual_identity, "not_verified")
+
             if not await submit.is_enabled():
                 logger.emit("post_failed", job_id=job_id, reason="submit_disabled",
                             run_id=run_id)
