@@ -103,7 +103,7 @@ class DestinationLockService:
                      allowed_labels_json, is_locked, is_enabled, updated_by,
                      created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (platform, destination_username, display_label or self.platform_label(platform),
+            """, (pipeline_id, platform, destination_username, display_label or self.platform_label(platform),
                   json.dumps(labels), int(is_locked), int(is_enabled), updated_by,
                   datetime.now(timezone.utc).isoformat(),
                   datetime.now(timezone.utc).isoformat()))
@@ -131,13 +131,13 @@ class DestinationLockService:
             if not updates:
                 return self.get_lock_by_id(kwargs.get("id"))
             params.append(datetime.now(timezone.utc).isoformat())
-            params.append(kwargs.get("id"))
+            params.append(pipeline_id)
             conn.execute(
-                f"UPDATE destination_locks SET {', '.join(updates)}, updated_at = ? WHERE id = ?",
+                f"UPDATE destination_locks SET {', '.join(updates)}, updated_at = ? WHERE pipeline_id = ?",
                 params
             )
             conn.commit()
-            return self.get_lock(kwargs.get("id"))
+            return self.get_lock(pipeline_id)
         finally:
             conn.close()
 
@@ -169,19 +169,6 @@ class DestinationLockService:
             "messenger": "Messenger",
         }
         return labels.get(platform.lower(), platform.capitalize())
-
-    def get_lock(self, pipeline_id: int) -> Optional[dict]:
-        """Lấy cấu hình Destination Lock của một Pipeline."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            row = conn.execute(
-                "SELECT * FROM destination_locks WHERE pipeline_id = ? AND is_enabled = 1",
-                (pipeline_id,)
-            ).fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
 
     def apply_destination_lock(self, caption: str, pipeline_id: int,
                                 preferred_label: Optional[str] = None) -> tuple[str, bool, str]:
@@ -250,7 +237,13 @@ class DestinationLockService:
         lines = caption.strip().split('\n')
         last_line = lines[-1].strip() if lines else ""
 
-        if username_clean in last_line and lock["display_label"].lower() in last_line.lower():
+        # Kiểm tra chính xác: dòng cuối phải chứa username và label
+        # Sử dụng regex để match chính xác pattern "Label @username" ở cuối caption
+        expected_footer_pattern = re.compile(
+            rf"{re.escape(lock['display_label'])}\s+{re.escape(lock['destination_username'])}\s*$",
+            re.IGNORECASE
+        )
+        if expected_footer_pattern.search(last_line):
             return True, "Footer hợp lệ"
 
         return False, f"Thiếu Destination Lock: {lock['display_label']} @{lock['destination_username'].lstrip('@')}"

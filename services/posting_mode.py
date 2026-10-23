@@ -285,7 +285,10 @@ async def select_nickname_from_facebook_suggestions(page: Page) -> tuple[str, li
         return "", []
     
     # Tìm biệt danh do Facebook đề xuất (thường là tên ngẫu nhiên như Leo3363, User123, etc.)
-    suggested = [name for name in names if is_facebook_suggested_nickname(name)]
+    suggested = []
+    for name in names:
+        if await is_facebook_suggested_nickname(name):
+            suggested.append(name)
     
     if suggested:
         # Chọn biệt danh đầu tiên được đề xuất
@@ -420,7 +423,7 @@ async def enforce_posting_identity(page: Page, pipeline_id: int, account_id: int
     
     if mode == MODE_NICKNAME:
         # Thử chọn biệt danh từ Facebook (ưu tiên đã lưu, sau đó Facebook đề xuất)
-        selected, available, status = await require_nickname_identity(page, 2, account_id, group_id, configured_nickname)
+        selected, available, status = await require_nickname_identity(page, pipeline_id, account_id, group_id, configured_nickname)
         
         if not selected:
             known = ", ".join(available[:3]) if available else "Facebook không hiển thị danh tính nào"

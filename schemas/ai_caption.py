@@ -87,6 +87,7 @@ class CaptionSettings(BaseModel):
     auto_use_when_safe: bool = False
     require_manual_review: bool = True
     max_hashtags: int = Field(default=5, ge=0, le=20)
+    pipeline_id: int = 0
 
 
 class CaptionSettingsUpdate(BaseModel):
