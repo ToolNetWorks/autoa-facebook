@@ -68,12 +68,23 @@ export function ScheduleModal({ pipelineId, open, onClose, onChanged }: {
     if (!pipelineId) return;
     setLoading(true);
     try {
-      const [scheduleResponse, previewResponse] = await Promise.all([
+      // Load schedule and preview independently to handle partial failures
+      const [scheduleResponse, previewResponse] = await Promise.allSettled([
         api.get<{ schedule: ScheduleSettings }>(`/api/pipelines/${pipelineId}/schedule`),
         api.get<PreviewPayload>(`/api/pipelines/${pipelineId}/schedule/preview`),
       ]);
-      setSettings(scheduleResponse.schedule);
-      setPreview(previewResponse);
+
+      if (scheduleResponse.status === 'fulfilled') {
+        setSettings(scheduleResponse.value.schedule);
+      } else {
+        push(`Không tải được cấu hình lịch: ${scheduleResponse.reason?.message ?? 'Lỗi không xác định'}`, 'error');
+      }
+
+      if (previewResponse.status === 'fulfilled') {
+        setPreview(previewResponse.value);
+      } else {
+        push(`Không tải được bản xem trước: ${previewResponse.reason?.message ?? 'Lỗi không xác định'}`, 'error');
+      }
     } catch (failure) {
       push(failure instanceof Error ? failure.message : 'Không tải được lịch đăng', 'error');
     } finally {
