@@ -58,7 +58,6 @@ Trả về đúng một đối tượng JSON, không thêm văn bản khác:
  "changes": [{"kind": "...", "summary": "...", "before": "...", "after": "..."}],
  "reason": "..."}"""
 
-
 @dataclass(frozen=True)
 class ProviderConfig:
     base_url: str = ""
@@ -70,7 +69,6 @@ class ProviderConfig:
     @property
     def configured(self) -> bool:
         return bool(self.base_url and self.api_key)
-
 
 def load_provider_config(model_override: str = "") -> ProviderConfig:
     """Read the provider configuration from the environment."""
@@ -89,7 +87,6 @@ def load_provider_config(model_override: str = "") -> ProviderConfig:
         retries = DEFAULT_MAX_RETRIES
     return ProviderConfig(base_url=base_url, api_key=api_key, model=model,
                           timeout=timeout, max_retries=retries)
-
 
 def parse_provider_response(raw: str) -> dict:
     """Read an answer from an OpenAI-compatible gateway.
@@ -123,7 +120,6 @@ def parse_provider_response(raw: str) -> dict:
             return {"choices": [{"message": {"content": "".join(contents)}}]}
     return json.loads(text)
 
-
 def _extract_json(content: str) -> dict:
     """Pull a JSON object out of a model answer that may be fenced."""
     text = (content or "").strip()
@@ -143,10 +139,8 @@ def _extract_json(content: str) -> dict:
             raise ValueError("AI provider returned a malformed JSON answer") from error
     raise ValueError("AI provider returned no JSON answer")
 
-
 class ProviderError(RuntimeError):
     """Raised when the AI provider cannot be used."""
-
 
 def call_provider(config: ProviderConfig, caption: str, analysis: CaptionAnalysis,
                    settings: CaptionSettings, target: str) -> CaptionOptimization:
@@ -186,16 +180,15 @@ def call_provider(config: ProviderConfig, caption: str, analysis: CaptionAnalysi
             return CaptionOptimization(
                 status=STATUS_NEEDS_REVIEW,
                 original_caption=caption,
-                optimized_caption=rewritten[:20000],
-                issues=[CaptionIssue(**issue) for issue in parsed.get("issues", []) or []
-                        if isinstance(issue, dict)],
-                changes=[CaptionChange(**change) for change in parsed.get("changes", []) or []
-                         if isinstance(change, dict)],
-                reason=str(parsed.get("reason", ""))[:1000],
-                topic=str(parsed.get("topic", ""))[:300],
-                intent=str(parsed.get("intent", ""))[:300],
-                key_facts=[str(fact)[:200] for fact in parsed.get("key_facts", []) or []],
-                ai_model=config.model, provider="openai-compatible", engine="openai")
+                optimized_caption=rewritten,
+                risk_level=RISK_UNKNOWN,
+                meaning_preserved=False,
+                issues=[CaptionIssue(category="provider", severity=SEVERITY_HIGH, message="Empty response from provider", excerpt="")],
+                changes=[],
+                reason="Provider returned empty response",
+                ai_model=config.model, provider="openai-compatible", engine="openai",
+                topic=analysis.topic, intent=analysis.intent,
+                key_facts=analysis.key_facts)
         except urllib.error.HTTPError as error:
             last_error = f"HTTP {error.code}"
             if error.code not in RETRYABLE_STATUS:
@@ -214,8 +207,6 @@ def _worst(issues: list[CaptionIssue]) -> str:
         return SEVERITY_HIGH
     if any(issue.severity == SEVERITY_MEDIUM for issue in issues):
         return SEVERITY_MEDIUM
-    if issues:
-        return SEVERITY_LOW
     return SEVERITY_LOW
 
 
@@ -351,7 +342,20 @@ def optimize_caption(caption: str, settings: CaptionSettings, model_override: st
                         before=text[:2000], after=optimized[:2000]
                     )]
         except Exception as e:
-            LOG.warning("Failed to apply Destination Lock: %s", e)
+            LOG.error("Failed to apply Destination Lock: %s", e)
+            return CaptionOptimization(
+                status=STATUS_NEEDS_REVIEW,
+                original_caption=text,
+                optimized_caption=optimized,
+                risk_level=RISK_HIGH,
+                meaning_preserved=False,
+                issues=[CaptionIssue(category="system", severity=SEVERITY_HIGH, message=f"Lỗi gắn Destination Lock: {e}", excerpt="")],
+                changes=changes,
+                reason=f"Lỗi hệ thống Destination Lock: {e}",
+                ai_model=model,
+                provider="openai-compatible" if config.configured else "local",
+                engine=engine, topic=analysis.topic, intent=analysis.intent,
+                key_facts=analysis.key_facts)
 
     return CaptionOptimization(status=status, original_caption=text, optimized_caption=optimized,
                                risk_level=risk, meaning_preserved=meaning_ok, issues=issues,

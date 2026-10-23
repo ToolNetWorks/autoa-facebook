@@ -2176,7 +2176,7 @@ def caption_settings_payload(row) -> dict:
     }
 
 
-def settings_to_schema(row) -> CaptionSettings:
+def settings_to_schema(row, pipeline_id: int) -> CaptionSettings:
     return CaptionSettings(
         enabled=bool(row["enabled"]), tone=row["tone"], language=row["language"],
         model=row["model"], target=row["target"], add_hashtags=bool(row["add_hashtags"]),
@@ -2185,7 +2185,8 @@ def settings_to_schema(row) -> CaptionSettings:
         optimize_for_group=bool(row["optimize_for_group"]),
         auto_use_when_safe=bool(row["auto_use_when_safe"]),
         require_manual_review=bool(row["require_manual_review"]),
-        max_hashtags=row["max_hashtags"])
+        max_hashtags=row["max_hashtags"],
+        pipeline_id=pipeline_id)
 
 
 def record_payload(row) -> dict:
@@ -2271,7 +2272,7 @@ def optimize_caption_endpoint(pipeline_id: int, data: CaptionOptimizeRequest,
     with db() as conn:
         entry(conn, "pipelines", pipeline_id)
         row = caption_settings_row(conn, pipeline_id)
-    settings = settings_to_schema(row)
+    settings = settings_to_schema(row, pipeline_id)
     if data.target:
         settings.target = data.target
     if data.tone:

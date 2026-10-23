@@ -108,7 +108,7 @@ class DestinationLockService:
                   datetime.now(timezone.utc).isoformat(),
                   datetime.now(timezone.utc).isoformat()))
             conn.commit()
-            return self.get_lock(conn.lastrowid)
+            return self.get_lock(pipeline_id)
         finally:
             conn.close()
 
@@ -129,7 +129,7 @@ class DestinationLockService:
                     updates.append(f"{key} = ?")
                     params.append(value)
             if not updates:
-                return self.get_lock_by_id(kwargs.get("id"))
+                return self.get_lock(pipeline_id)
             params.append(datetime.now(timezone.utc).isoformat())
             params.append(pipeline_id)
             conn.execute(
