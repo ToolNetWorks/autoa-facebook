@@ -67,7 +67,10 @@ class DestinationLock:
 class DestinationLockService:
     """Service quản lý Destination Lock cho các Pipeline."""
 
-    def __init__(self, db_path: str = "data/manager.sqlite3"):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            from app import DB_PATH
+            db_path = str(DB_PATH)
         self.db_path = db_path
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -77,8 +80,7 @@ class DestinationLockService:
 
     def get_lock(self, pipeline_id: int) -> Optional[dict]:
         """Lấy cấu hình Destination Lock của một Pipeline."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = self._get_conn()
         try:
             row = conn.execute(
                 "SELECT * FROM destination_locks WHERE pipeline_id = ? AND is_enabled = 1",
@@ -92,8 +94,7 @@ class DestinationLockService:
                     display_label: str = "", allowed_labels: Optional[List[str]] = None,
                     is_locked: bool = True, is_enabled: bool = True, updated_by: Optional[int] = None) -> dict:
         """Tạo Destination Lock cho một Pipeline."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = self._get_conn()
         try:
             now = datetime.now(timezone.utc).isoformat()
             labels = allowed_labels or [self.platform_label(platform)]
@@ -114,8 +115,7 @@ class DestinationLockService:
 
     def update_lock(self, pipeline_id: int, **kwargs) -> Optional[dict]:
         """Cập nhật Destination Lock."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = self._get_conn()
         try:
             now = datetime.now(timezone.utc).isoformat()
             allowed_fields = {
@@ -142,8 +142,7 @@ class DestinationLockService:
             conn.close()
 
     def get_lock_by_id(self, lock_id: int) -> Optional[dict]:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = self._get_conn()
         try:
             row = conn.execute("SELECT * FROM destination_locks WHERE id = ?", (lock_id,)).fetchone()
             return dict(row) if row else None
@@ -151,7 +150,7 @@ class DestinationLockService:
             conn.close()
 
     def delete_lock(self, pipeline_id: int) -> bool:
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_conn()
         try:
             conn.execute("DELETE FROM destination_locks WHERE pipeline_id = ?", (pipeline_id,))
             conn.commit()

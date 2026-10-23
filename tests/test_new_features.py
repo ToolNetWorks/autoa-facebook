@@ -437,7 +437,7 @@ def test_no_duplicate_posts_with_unclear_facebook_results(client):
     print("✓ Test 7 passed: No duplicate posts with same idempotency key")
 
 
-def test_nickname_acceptance_first_facebook_suggested(client):
+def test_nickname_acceptance_first_facebook_suggested(client, setup_test_database):
     """Test 8: Accept Facebook nickname when first offered, don't convert to real name."""
     # Setup destination locks table for testing
     setup_destination_locks_table()
