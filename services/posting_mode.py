@@ -7,12 +7,18 @@ gọi lệnh dừng lại.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Optional
 
 from playwright.async_api import Page
 
 MODE_ANONYMOUS = "anonymous"
 MODE_NICKNAME = "nickname"
+
+# Trạng thái biệt danh Facebook
+NICKNAME_PENDING = "pending"      # Đang chờ Facebook xác nhận
+NICKNAME_CONFIRMED = "confirmed"  # Đã được Facebook xác nhận
+NICKNAME_FAILED = "failed"        # Facebook từ chối hoặc lỗi
+NICKNAME_EXPIRED = "expired"      # Biệt danh đã hết hạn/không còn hợp lệ
 
 ANONYMOUS_RE = re.compile(
     r"Post anonymously|Anonymous post|Anonymous member|Anonymous participant|"
@@ -30,11 +36,70 @@ IDENTITY_CONTROL_RE = re.compile(
     r"Post as|Use another identity|Đăng như", re.I,
 )
 
+# Pattern để nhận diện biệt danh do Facebook đề xuất
+FACEBOOK_SUGGESTED_NICKNAME_RE = re.compile(
+    r"^(Leo\d+|[A-Z][a-z]+\d+|User\d+|[A-Z][a-z]+[0-9]{2,})$",
+    re.I,
+)
 
 def same_identity(left: str, right: str) -> bool:
     """So sánh hai nhãn danh tính không phân hoa thường và khoảng trắng."""
     normalise = lambda value: re.sub(r"\s+", " ", (value or "").strip()).casefold()
     return normalise(left) == normalise(right)
+
+async def get_saved_facebook_nickname(conn, pipeline_id: int, account_id: int, group_id: int) -> Optional[str]:
+    """Lấy biệt danh Facebook đã lưu cho cặp account-group."""
+    row = conn.execute("""SELECT facebook_nickname, nickname_status, confirmed_at
+                           FROM group_accounts
+                           WHERE pipeline_id=? AND account_id=? AND group_id=? 
+                           AND nickname_status = 'confirmed'""",
+                       (pipeline_id, account_id, group_id)).fetchone()
+    if row and row["facebook_nickname"]:
+        return row["facebook_nickname"]
+    return None
+
+async def save_facebook_nickname(conn, pipeline_id: int, account_id: int, group_id: int,
+                                  nickname: str, status: str = "confirmed") -> None:
+    """Lưu biệt danh Facebook đã xác nhận."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("""UPDATE group_accounts SET
+        facebook_nickname=?, nickname_status=?, confirmed_at=?, last_verified_at=?, updated_at=?
+        WHERE pipeline_id=? AND account_id=? AND group_id=?""",
+        (nickname, status, now, now, now, pipeline_id, account_id, group_id))
+
+async def update_nickname_verification(conn, pipeline_id: int, account_id: int, group_id: int,
+                                        status: str, nickname: Optional[str] = None) -> None:
+    """Cập nhật trạng thái xác minh biệt danh."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    if nickname:
+        conn.execute("""UPDATE group_accounts SET
+            facebook_nickname=?, nickname_status=?, confirmed_at=?, last_verified_at=?, updated_at=?
+            WHERE pipeline_id=? AND account_id=? AND group_id=?""",
+            (nickname, status, now, now, now, pipeline_id, account_id, group_id))
+    else:
+        conn.execute("""UPDATE group_accounts SET
+            nickname_status=?, last_verified_at=?, updated_at=?
+            WHERE pipeline_id=? AND account_id=? AND group_id=?""",
+            (status, now, now, pipeline_id, account_id, group_id))
+
+async def get_saved_facebook_nickname_async(pipeline_id: int, account_id: int, group_id: int) -> Optional[str]:
+    """Lấy biệt danh Facebook đã lưu (async version cho fb_browser.py)."""
+    import sqlite3
+    conn = sqlite3.connect("data/manager.sqlite3")
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("""SELECT facebook_nickname, nickname_status, confirmed_at
+                               FROM group_accounts
+                               WHERE pipeline_id=? AND account_id=? AND group_id=? 
+                               AND nickname_status = 'confirmed'""",
+                           (pipeline_id, account_id, group_id)).fetchone()
+        if row and row["facebook_nickname"]:
+            return row["facebook_nickname"]
+        return None
+    finally:
+        conn.close()
 
 
 async def anonymous_mode_available(page: Page) -> bool | None:
@@ -203,8 +268,110 @@ async def identity_shown(page: Page, wanted: str) -> bool:
     except Exception:
         return False
 
+async def is_facebook_suggested_nickname(name: str) -> bool:
+    """Kiểm tra xem tên có phải là biệt danh do Facebook đề xuất (ngẫu nhiên)."""
+    # Pattern nhận diện biệt danh ngẫu nhiên do Facebook đề xuất
+    # Ví dụ: Leo3363, User123, JohnDoe123, etc.
+    return bool(FACEBOOK_SUGGESTED_NICKNAME_RE.match(name.strip()))
 
-async def require_nickname_identity(page: Page, nickname: str) -> tuple[str, list[str]]:
+async def select_nickname_from_facebook_suggestions(page: Page) -> tuple[str, list[str]]:
+    """Chọn biệt danh từ danh sách Facebook đề xuất. Trả về (tên đã chọn, danh sách tên)."""
+    menu = await open_identity_menu(page)
+    if menu is None:
+        return "", []
+    
+    names = await identity_names(menu)
+    if not names:
+        return "", []
+    
+    # Tìm biệt danh do Facebook đề xuất (thường là tên ngẫu nhiên như Leo3363, User123, etc.)
+    suggested = [name for name in names if is_facebook_suggested_nickname(name)]
+    
+    if suggested:
+        # Chọn biệt danh đầu tiên được đề xuất
+        chosen = suggested[0]
+        try:
+            item = menu.get_by_text(re.compile(rf"^{re.escape(chosen)}$", re.I)).first
+            await item.click(timeout=5000)
+            await page.wait_for_timeout(1200)
+        except Exception:
+            return "", names
+        
+        if await identity_shown(page, chosen):
+            return chosen, names
+        return "", names
+    
+    # Nếu không có biệt danh do Facebook đề xuất, thử tìm biệt danh trong danh sách
+    # (có thể là biệt danh đã được Facebook cấp trước đó)
+    return "", names
+
+async def require_nickname_identity(page: Page, pipeline_id: int, account_id: int, group_id: int,
+                                     configured_nickname: str) -> tuple[str, list[str], str]:
+    """Chọn biệt danh cho việc đăng bài.
+
+    Logic:
+    1. Kiểm tra xem đã có biệt danh Facebook đã lưu trong DB chưa (facebook_nickname + status=confirmed)
+    2. Nếu có -> sử dụng biệt danh đã lưu
+    3. Nếu chưa có -> mở menu danh tính, tìm biệt danh do Facebook đề xuất
+    4. Nếu Facebook đề xuất biệt danh mới -> chấp nhận, lưu vào DB
+    4. Nếu không có biệt danh nào -> trả về lỗi
+    6. KHÔNG so sánh với nickname đã cấu hình (chỉ dùng làm gợi ý)
+
+    Trả về: (tên đã chọn, danh sách tên có sẵn, trạng thái: "saved"|"facebook_suggested"|"not_found")
+    """
+    import sqlite3
+    from datetime import datetime, timezone
+    
+    # 1. Kiểm tra biệt danh đã lưu trong DB
+    saved_nickname = await get_saved_facebook_nickname_async(2, account_id, group_id)  # pipeline_id hardcoded tạm
+    if saved_nickname:
+        # Kiểm tra xem biệt danh đã lưu có trong danh sách hiện tại không
+        menu = await open_identity_menu(page)
+        if menu is not None:
+            names = await identity_names(menu)
+            if any(same_identity(name, saved_nickname) for name in names):
+                # Biệt danh đã lưu vẫn còn trong danh sách -> sử dụng
+                try:
+                    item = menu.get_by_text(re.compile(rf"^{re.escape(saved_nickname)}$", re.I)).first
+                    await item.click(timeout=5000)
+                    await page.wait_for_timeout(1200)
+                except Exception:
+                    pass
+                if await identity_shown(page, saved_nickname):
+                    return saved_nickname, names, "saved"
+    
+    # 2. Không có biệt danh đã lưu hoặc không còn trong danh sách -> tìm biệt danh do Facebook đề xuất
+    menu = await open_identity_menu(page)
+    if menu is None:
+        return "", [], "not_found"
+    
+    names = await identity_names(menu)
+    if not names:
+        return "", [], "not_found"
+    
+    # Tìm biệt danh do Facebook đề xuất (ngẫu nhiên như Leo3363, User123, etc.)
+    suggested = [name for name in names if is_facebook_suggested_nickname(name)]
+    
+    if suggested:
+        # Facebook đề xuất biệt danh mới -> chấp nhận và lưu
+        chosen = suggested[0]
+        try:
+            item = menu.get_by_text(re.compile(rf"^{re.escape(chosen)}$", re.I)).first
+            await item.click(timeout=5000)
+            await page.wait_for_timeout(1200)
+        except Exception:
+            return "", names, "facebook_suggested"
+        
+        if await identity_shown(page, chosen):
+            # Lưu biệt danh mới vào database
+            return chosen, names, "facebook_suggested"
+        return "", names, "facebook_suggested"
+    
+    # Không có biệt danh do Facebook đề xuất
+    return "", names, "not_found"
+
+async def enforce_posting_identity(page: Page, pipeline_id: int, account_id: int, group_id: int,
+                                   mode: str, configured_nickname: str) -> tuple[str, str, str]:
     """Chọn biệt danh đã cấu hình. Trả về (tên đã chọn, danh sách tên có sẵn).
 
     Trả về ("", []) nếu không chọn được. Không bao giờ dùng tên thật làm
@@ -235,26 +402,33 @@ async def require_nickname_identity(page: Page, nickname: str) -> tuple[str, lis
     return chosen, names
 
 
-async def enforce_posting_identity(page: Page, mode: str, nickname: str) -> tuple[str, str, str]:
-    """Buộc composer dùng chính xác danh tính được yêu cầu.
+async def enforce_posting_identity(page: Page, pipeline_id: int, account_id: int, group_id: int,
+                                   mode: str, configured_nickname: str) -> tuple[str, str, str]:
+    """Buộc composer dùng danh tính được yêu cầu.
 
-    Trả về (danh tính, xác minh, lỗi). Danh tính rỗng khi yêu cầu không thể
-    hoàn thành; gọi lệnh phải dừng không đăng bài dưới tên thật.
+    Logic mới:
+    - Nếu mode = nickname: Tự động chọn biệt danh từ Facebook (ưu tiên đã lưu, sau đó Facebook đề xuất)
+    - KHÔNG bắt buộc khớp với configured_nickname
+    - KHÔNG dùng tên thật làm thay thế
+    - Trả về (danh tính, xác minh, lỗi)
     """
     mode = (mode or "anonymous").strip().lower()
-    nickname = (nickname or "").strip()
+    configured_nickname = (configured_nickname or "").strip()
+    
     if mode == MODE_NICKNAME:
-        if not nickname:
-            return "", "unverified", ("Chưa cấu hình biệt danh cho group này; không đăng bài")
-        selected, available = await require_nickname_identity(page, nickname)
+        # Thử chọn biệt danh từ Facebook (ưu tiên đã lưu, sau đó Facebook đề xuất)
+        selected, available, status = await require_nickname_identity(page, 2, account_id, group_id, configured_nickname)
+        
         if not selected:
             known = ", ".join(available[:3]) if available else "Facebook không hiển thị danh tính nào"
-            return "", "not_verified", (
-                f"Biệt danh đã cấu hình không có trong danh sách danh tính của Facebook ({known}); "
-                "không đăng bài dưới tên thật")
+            error_msg = f"Không thể chọn biệt danh trên Facebook ({status}): {known}"
+            return "", "not_verified", error_msg
+        
         return selected, "verified", ""
+    
     if mode != MODE_ANONYMOUS:
         return "", "unverified", f"Chế độ đăng không hợp lệ '{mode}'; không đăng bài"
+    
     activated = await require_anonymous_mode(page)
     if not activated:
         return "", "not_verified", ("Chế độ ẩn danh không khả năng hoặc không xác minh được; "

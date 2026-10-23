@@ -1021,7 +1021,7 @@ async def attempt_post(data: dict):
                 return result("failed", "Không mở được ô soạn bài; không đăng bài")
             await page.wait_for_timeout(1500)
             actual_identity, verification, identity_error = await enforce_posting_identity(
-                page, mode, nickname)
+                page, data["pipeline_id"], data["account_id"], data["group_id"], mode, nickname)
             if identity_error:
                 await page.screenshot(path=str(evidence_path), full_page=False, timeout=10000)
                 logger.emit("post_needs_review", job_id=job_id, reason=identity_error,
@@ -1506,7 +1506,8 @@ async def _cli_check_identity(payload: dict) -> dict:
                         if not nickname:
                             outcome.update(status="needs_nickname", details="Chưa cấu hình biệt danh")
                         else:
-                            selected, names = await require_nickname_identity(page, nickname)
+                            selected, names, status = await require_nickname_identity(
+                                page, data["pipeline_id"], data["account_id"], data["group_id"], nickname)
                             outcome["available"] = bool(selected)
                             outcome["details"] = (f"Đã chọn '{selected}'" if selected
                                                   else f"Biệt danh không có sẵn ({', '.join(names[:3]) if names else 'không có'})")
