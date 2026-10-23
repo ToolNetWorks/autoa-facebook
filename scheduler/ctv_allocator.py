@@ -190,7 +190,7 @@ def plan_for_owner(conn, pipeline_id: int, settings: dict, moment: datetime | No
 
     accounts = _account_rows(conn, pipeline_id, settings)
     groups = _group_rows(conn, pipeline_id, settings)
-    eligible = group_eligibility.eligible_pairs(conn, pipeline_id, groups)
+    eligible = group_eligibility.eligible_pairs(conn, pipeline_id, groups, for_scheduling=True)
     media = _media_rows(conn, pipeline_id)
     provider_config = provider_config or ai_provider.load_config()
     rules = settings.get("schedule_rules") or {}

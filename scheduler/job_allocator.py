@@ -188,7 +188,7 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
 
     accounts = _account_rows(conn, pipeline_id, settings)
     groups = _group_rows(conn, pipeline_id, settings)
-    eligible = group_eligibility.eligible_pairs(conn, pipeline_id, groups)
+    eligible = group_eligibility.eligible_pairs(conn, pipeline_id, groups, for_scheduling=True)
     media = _media_rows(conn, pipeline_id)
     overrides = account_overrides(conn, pipeline_id)
 

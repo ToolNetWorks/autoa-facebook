@@ -97,7 +97,7 @@ def mode_of(conn, account_id: int, group_id: int, group=None) -> tuple[str, str]
 
 
 def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
-                  group=None) -> dict:
+                  group=None, for_scheduling: bool = False) -> dict:
     """Quyết định cho một cặp Facebook–Group, kèm lý do và hướng xử lý.
 
     Hàm luôn trả về một quyết định. Khi không đủ điều kiện thì ``eligible``
@@ -188,9 +188,12 @@ def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
     status = group_verification.servable_status_of(conn, pipeline_id, account_id, group_id, mode)
 
     # FIRST POST FLOW: Group chưa từng có bằng chứng đăng bài. Bài đầu tiên
-    # chính là lần xác minh thực tế, nên NOT_TESTED không phải lý do chặn.
-    if status == group_verification.NOT_TESTED:
-        return {"eligible": True, "status": group_verification.NOT_TESTED,
+    # chính là lần xác minh thực tế, nên NOT_TESTED và SUBMITTED_UNVERIFIED
+    # không phải lý do chặn khi đang lưu lịch (for_scheduling=True).
+    is_first_post_status = (status == group_verification.NOT_TESTED or
+                            (for_scheduling and status == group_verification.SUBMITTED_UNVERIFIED))
+    if is_first_post_status:
+        return {"eligible": True, "status": status,
                 "reason": "Group chưa từng có bài đăng thật. Bài đầu tiên là lần xác minh.",
                 "action": "Hệ thống sẽ chuẩn bị bài đầu tiên khi bạn bấm Xếp lịch ngay.",
                 "mode": mode, "first_post_eligible": True, "recurring_eligible": False,
@@ -288,7 +291,8 @@ def _evidence(row) -> dict:
 
 
 def eligible_pairs(conn, pipeline_id: int, groups: list[dict],
-                   account_id: int | None = None, first_post: bool = True) -> list[dict]:
+                   account_id: int | None = None, first_post: bool = True,
+                   for_scheduling: bool = False) -> list[dict]:
     """Các cặp Facebook–Group đủ điều kiện đăng.
 
     Kết quả là một danh sách group, mỗi group ghi kèm các tài khoản được phép
@@ -298,6 +302,9 @@ def eligible_pairs(conn, pipeline_id: int, groups: list[dict],
     cũng được phép, vì bài đầu tiên chính là lần xác minh. Bộ xếp lịch đăng
     lặp lại thì truyền ``first_post=False`` để chỉ phục vụ group đã có bằng
     chứng.
+
+    Khi ``for_scheduling=True``, không lọc theo trạng thái screening - cho phép
+    tất cả group được CTV chọn làm đích.
     """
     result = []
     for group in groups:
@@ -306,7 +313,8 @@ def eligible_pairs(conn, pipeline_id: int, groups: list[dict],
             candidates = [item for item in candidates if item == int(account_id)]
         allowed = []
         for candidate in candidates:
-            decision = pair_decision(conn, pipeline_id, candidate, group["id"], group)
+            decision = pair_decision(conn, pipeline_id, candidate, group["id"], group,
+                                     for_scheduling=for_scheduling)
             if not decision["eligible"]:
                 continue
             if not first_post and not decision.get("recurring_eligible", True):

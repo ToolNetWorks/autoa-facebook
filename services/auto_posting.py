@@ -49,7 +49,8 @@ def eligible_groups(groups: list[dict], account_id: int | None = None,
             allowed = []
             for candidate in group_eligibility.accounts_of(conn, pipeline_id, group):
                 decision = group_eligibility.pair_decision(conn, pipeline_id, candidate,
-                                                            group["id"], group)
+                                                            group["id"], group,
+                                                            for_scheduling=True)
                 if decision["eligible"]:
                     allowed.append(candidate)
             if account_id is not None:
