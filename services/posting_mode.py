@@ -87,7 +87,8 @@ async def update_nickname_verification(conn, pipeline_id: int, account_id: int, 
 async def get_saved_facebook_nickname_async(pipeline_id: int, account_id: int, group_id: int) -> Optional[str]:
     """Lấy biệt danh Facebook đã lưu (async version cho fb_browser.py)."""
     import sqlite3
-    conn = sqlite3.connect("data/manager.sqlite3")
+    from app import DB_PATH
+    conn = sqlite3.connect(str(DB_PATH), timeout=25)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute("""SELECT facebook_nickname, nickname_status, confirmed_at
@@ -313,7 +314,8 @@ async def save_facebook_nickname_async(pipeline_id: int, account_id: int, group_
     """Lưu biệt danh Facebook đã xác nhận (async version cho fb_browser.py)."""
     import sqlite3
     from datetime import datetime, timezone
-    conn = sqlite3.connect("data/manager.sqlite3")
+    from app import DB_PATH
+    conn = sqlite3.connect(str(DB_PATH), timeout=25)
     try:
         now = datetime.now(timezone.utc).isoformat()
         conn.execute("""UPDATE group_accounts SET
