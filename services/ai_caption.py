@@ -27,6 +27,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from services.destination_lock import DestinationLockService
+
 from schemas.ai_caption import (
     RISK_HIGH, RISK_LOW, RISK_MEDIUM, RISK_UNKNOWN, SEVERITY_HIGH, SEVERITY_LOW,
     SEVERITY_MEDIUM, STATUS_APPROVED, STATUS_BLOCKED, STATUS_NEEDS_REVIEW,
@@ -326,6 +328,31 @@ def optimize_caption(caption: str, settings: CaptionSettings, model_override: st
     if not changes and optimized.strip() != text.strip():
         changes = [CaptionChange(kind="wording", summary="Bản caption được viết lại.",
                                  before=text[:2000], after=optimized[:2000])]
+
+    # STEP 5 — Apply Destination Lock (if pipeline_id is available in settings)
+    if getattr(settings, 'pipeline_id', None):
+        try:
+            from services.destination_lock import DestinationLockService
+            lock_service = DestinationLockService()
+            optimized, was_modified, lock_message = lock_service.apply_lock_to_caption(
+                optimized, settings.pipeline_id)
+            if was_modified:
+                if changes:
+                    changes.append(CaptionChange(
+                        kind="destination_lock",
+                        summary="Đã gắn Destination Lock",
+                        before=optimized.replace(lock_service.get_lock(settings.pipeline_id)['display_label'] + ' @', '')[:2000],
+                        after=optimized[:2000]
+                    ))
+                else:
+                    changes = [CaptionChange(
+                        kind="destination_lock",
+                        summary="Đã gắn Destination Lock",
+                        before=text[:2000], after=optimized[:2000]
+                    )]
+        except Exception as e:
+            LOG.warning("Failed to apply Destination Lock: %s", e)
+
     return CaptionOptimization(status=status, original_caption=text, optimized_caption=optimized,
                                risk_level=risk, meaning_preserved=meaning_ok, issues=issues,
                                changes=changes, reason=reason, ai_model=model,
