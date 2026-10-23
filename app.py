@@ -383,6 +383,10 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'active',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            facebook_nickname TEXT NOT NULL DEFAULT '',
+            nickname_status TEXT NOT NULL DEFAULT '',
+            confirmed_at TEXT NOT NULL DEFAULT '',
+            last_verified_at TEXT NOT NULL DEFAULT '',
             UNIQUE(account_id, group_id)
         );
         CREATE INDEX IF NOT EXISTS idx_group_accounts_group ON group_accounts(group_id,status);

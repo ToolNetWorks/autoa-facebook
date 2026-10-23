@@ -323,7 +323,7 @@ async def require_nickname_identity(page: Page, pipeline_id: int, account_id: in
     from datetime import datetime, timezone
     
     # 1. Kiểm tra biệt danh đã lưu trong DB
-    saved_nickname = await get_saved_facebook_nickname_async(2, account_id, group_id)  # pipeline_id hardcoded tạm
+    saved_nickname = await get_saved_facebook_nickname_async(pipeline_id, account_id, group_id)
     if saved_nickname:
         # Kiểm tra xem biệt danh đã lưu có trong danh sách hiện tại không
         menu = await open_identity_menu(page)
@@ -350,7 +350,10 @@ async def require_nickname_identity(page: Page, pipeline_id: int, account_id: in
         return "", [], "not_found"
     
     # Tìm biệt danh do Facebook đề xuất (ngẫu nhiên như Leo3363, User123, etc.)
-    suggested = [name for name in names if is_facebook_suggested_nickname(name)]
+    suggested = []
+    for name in names:
+        if await is_facebook_suggested_nickname(name):
+            suggested.append(name)
     
     if suggested:
         # Facebook đề xuất biệt danh mới -> chấp nhận và lưu

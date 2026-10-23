@@ -551,33 +551,6 @@ async def identity_shown(page, wanted: str) -> bool:
         return False
 
 
-async def require_nickname_identity(page, nickname: str):
-    """Select the configured nickname. Returns (selected, available names)."""
-    wanted = (nickname or "").strip()
-    if not wanted:
-        return "", []
-    menu = await open_identity_menu(page)
-    if menu is None:
-        return "", []
-    names = await identity_names(menu)
-    chosen = next((name for name in names if same_identity(name, wanted)), "")
-    if not chosen:
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-        return "", names
-    try:
-        item = menu.get_by_text(re.compile(rf"^{re.escape(chosen)}$", re.I)).first
-        await item.click(timeout=5000)
-        await page.wait_for_timeout(1200)
-    except Exception:
-        return "", names
-    if not await identity_shown(page, chosen):
-        return "", names
-    return chosen, names
-
-
 async def check_group(data: dict) -> dict:
     """Check what Facebook allows this account to do in a group.
 
@@ -902,33 +875,6 @@ async def fill_join_answers(page, questions: list[str], answers: dict) -> bool:
     except Exception:
         return False
     return filled
-
-
-async def enforce_posting_identity(page, mode: str, nickname: str):
-    """Make the composer use exactly the requested identity.
-
-    Returns (identity, verification, error). The identity is empty when the
-    request could not be honoured, and the caller must then stop without
-    posting. The profile name is never used as a substitute.
-    """
-    mode = (mode or "anonymous").strip().lower()
-    nickname = (nickname or "").strip()
-    if mode == "nickname":
-        if not nickname:
-            return "", "unverified", "Chưa cấu hình biệt danh cho group này; không đăng bài"
-        selected, available = await require_nickname_identity(page, nickname)
-        if not selected:
-            known = ", ".join(available[:3]) if available else "Facebook không hiển thị danh tính nào"
-            return "", "not_verified", (f"Biệt danh đã cấu hình không có trong danh sách danh tính của "
-                                        f"Facebook ({known}); không đăng bài dưới tên thật")
-        return selected, "verified", ""
-    if mode != "anonymous":
-        return "", "unverified", f"Chế độ đăng không hợp lệ '{mode}'; không đăng bài"
-    activated = await require_anonymous_mode(page)
-    if not activated:
-        return "", "not_verified", ("Chế độ ẩn danh không khả dụng hoặc không xác minh được; "
-                                    "không đăng bài dưới tên thật")
-    return "anonymous", "verified", ""
 
 
 async def active_composer_dialog(page):
