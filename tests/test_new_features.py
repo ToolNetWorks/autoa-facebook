@@ -7,7 +7,7 @@ These tests verify the new scenarios mentioned in the task description:
 4. Worker receives caption with missing footer → adds correct footer before Submit
 5. Worker doesn't post if lock is enabled but validation fails
 6. Two Pipelines with different Destination Locks don't mix data
-7. No duplicate posts when Facebook results are unclear
+7. No duplicate posts when results are unclear
 8. Accept Facebook nickname when first offered, don't convert to real name
 
 This replaces the old duplicated enforce_posting_identity() logic and integrates
@@ -24,18 +24,41 @@ import json
 import os
 import sqlite3
 from pathlib import Path
+import pytest
 
 CTV_PASSWORD = "ctv-password-2026-strong"
+
+# Global test database setup
+@pytest.fixture(scope="session", autouse=True)
+def setup_test_database(tmp_path_factory):
+    """Setup temporary test database to isolate tests from production."""
+    # Create a temporary directory for test data
+    test_data_dir = tmp_path_factory.mktemp("test_data")
+    test_db_path = test_data_dir / "manager.sqlite3"
+    
+    # Monkeypatch the app module to use the test database
+    import app as app_module
+    original_db_path = app_module.DB_PATH
+    app_module.DB_PATH = test_db_path
+    
+    # Also monkeypatch DATA to use the test directory
+    test_data_dir.mkdir(parents=True, exist_ok=True)
+    original_data = app_module.DATA
+    app_module.DATA = test_data_dir
+    
+    # Yield control to tests
+    yield
+    
+    # Restore original values
+    app_module.DB_PATH = original_db_path
+    app_module.DATA = original_data
 
 # Helper function to ensure destination_locks table exists in test database
 def setup_destination_locks_table():
     """Ensure destination_locks table exists for testing."""
-    if hasattr(m, 'DB_PATH'):
-        db_path = m.DB_PATH
-    else:
-        # Fallback to test data directory
-        db_path = Path(os.environ.get('DATA_DIR', str(Path(__file__).parent / 'data'))) / 'manager.sqlite3'
+    import app as app_module
     
+    db_path = app_module.DB_PATH
     if not db_path.exists():
         return
     
@@ -102,8 +125,8 @@ def make_media(admin, pipeline_id, name, sha=None, signature=''):
              size_bytes,sha256,signature,analysis_status,safety_status,usable,description,tags_json,
              created_at,updated_at,owner_user_id)
             VALUES(?,?,?,?,?,'image/jpeg',600,600,1000,?,?,'done','pass',1,'ảnh sản phẩm đẹp','[]',?,?,NULL)""",
-            (pipeline_id, 1, f"{pipeline_id}/{name}", f"{pipeline_id}/thumbs/{name}", name,
-             sha or (name * 8)[:64], signature, m.iso(), m.iso()))
+             (pipeline_id, 1, f"{pipeline_id}/{name}", f"{pipeline_id}/thumbs/{name}", name,
+              sha or (name * 8)[:64], signature, m.iso(), m.iso()))
         return cursor.lastrowid
 
 
@@ -187,7 +210,7 @@ def save_config(ctv, pipeline_id, **overrides):
 # === Integration Tests for New Features ===
 
 
-def test_nickname_selection_persistent_across_restarts(client):
+def test_nickname_selection_persistent_across_restarts(client, setup_test_database):
     """Test 1: First Facebook nickname selection → save DB → restart → reuse."""
     # Setup destination locks table for testing
     setup_destination_locks_table()
@@ -229,7 +252,7 @@ def test_nickname_selection_persistent_across_restarts(client):
     print("✓ Test 1 passed: Nickname persistence scenario")
 
 
-def test_group_without_nickname_still_scheduled(client):
+def test_group_without_nickname_still_scheduled(client, setup_test_database):
     """Test 2: Group without configured nickname still gets scheduled."""
     # Setup destination locks table for testing
     setup_destination_locks_table()
@@ -250,7 +273,7 @@ def test_group_without_nickname_still_scheduled(client):
     print("✓ Test 2 passed: Groups without configured nickname are still scheduled")
 
 
-def test_destination_lock_admin_and_ctv_both_create_jobs(client):
+def test_destination_lock_admin_and_ctv_both_create_jobs(client, setup_test_database):
     """Test 3: Both Scheduler Admin and CTV create jobs with Destination Lock."""
     # Setup destination locks table for testing
     setup_destination_locks_table()
@@ -290,7 +313,7 @@ def test_destination_lock_admin_and_ctv_both_create_jobs(client):
     print("✓ Test 3 passed: Both Admin and CTV scheduling respect Destination Lock")
 
 
-def test_worker_adds_missing_destination_lock_footer(client):
+def test_worker_adds_missing_destination_lock_footer(client, setup_test_database):
     """Test 4: Worker receives caption with missing footer → adds correct footer before Submit."""
     # Setup destination locks table for testing
     setup_destination_locks_table()
@@ -320,7 +343,7 @@ def test_worker_adds_missing_destination_lock_footer(client):
     print("✓ Test 4 passed: Worker can add Destination Lock footer")
 
 
-def test_worker_respects_failed_destination_lock_validation(client):
+def test_worker_respects_failed_destination_lock_validation(client, setup_test_database):
     """Test 5: Worker doesn't post if lock is enabled but validation fails."""
     # Setup destination locks table for testing
     setup_destination_locks_table()
@@ -346,7 +369,7 @@ def test_worker_respects_failed_destination_lock_validation(client):
     print("✓ Test 5 passed: Worker respects Destination Lock validation failures")
 
 
-def test_two_pipelines_different_destination_locks(client):
+def test_two_pipelines_different_destination_locks(client, setup_test_database):
     """Test 6: Two Pipelines with different Destination Locks don't mix data."""
     # Setup destination locks table for testing
     setup_destination_locks_table()
@@ -393,7 +416,7 @@ def test_two_pipelines_different_destination_locks(client):
     print("✓ Test 6 passed: Pipelines maintain separate Destination Locks")
 
 
-def test_no_duplicate_posts_with_unclear_facebook_results(client):
+def test_no_duplicate_posts_with_unclear_facebook_results(client, setup_test_database):
     """Test 7: No duplicate posts when results are unclear."""
     # Setup destination locks table for testing
     setup_destination_locks_table()
