@@ -370,6 +370,18 @@ async def require_nickname_identity(page: Page, pipeline_id: int, account_id: in
         
         if await identity_shown(page, chosen):
             # Lưu biệt danh mới vào database
+            import sqlite3
+            from datetime import datetime, timezone
+            conn = sqlite3.connect("data/manager.sqlite3")
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute("""UPDATE group_accounts SET
+                    facebook_nickname=?, nickname_status=?, confirmed_at=?, last_verified_at=?, updated_at=?
+                    WHERE pipeline_id=? AND account_id=? AND group_id=?""",
+                    (chosen, "confirmed", now, now, now, pipeline_id, account_id, group_id))
+                conn.commit()
+            finally:
+                conn.close()
             return chosen, names, "facebook_suggested"
         return "", names, "facebook_suggested"
     
