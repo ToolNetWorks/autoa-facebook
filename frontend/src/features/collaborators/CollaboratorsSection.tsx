@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { api } from '@/services/apiClient';
 import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
-import { Input, Select } from '@/components/ui/Field';
+import { Input, Select, PasswordInput } from '@/components/ui/Field';
 import { Modal } from '@/components/ui/Modal';
 import { Alert, Badge, Card, DataTable, EmptyState, Skeleton } from '@/components/ui/Surfaces';
 import type { Collaborator, Permission, Pipeline } from '@/types/api';
@@ -229,9 +229,8 @@ export function CollaboratorsSection({ workspace }: { workspace: WorkspaceData }
           value={draft.username}
           onChange={(event) => setDraft({ ...draft, username: event.target.value })}
         />
-        <Input
+        <PasswordInput
           label="Mật khẩu"
-          type="password"
           name="ctv_password"
           value={draft.password}
           onChange={(event) => setDraft({ ...draft, password: event.target.value })}

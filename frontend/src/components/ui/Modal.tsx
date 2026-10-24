@@ -5,17 +5,19 @@ interface ModalProps {
   open: boolean;
   title: ReactNode;
   description?: ReactNode;
-  onClose: () => void;
+  onClose?: () => void;
   children: ReactNode;
   footer?: ReactNode;
   wide?: boolean;
+  closable?: boolean;
 }
 
-export function Modal({ open, title, description, onClose, children, footer, wide }: ModalProps) {
+export function Modal({ open, title, description, onClose, children, footer, wide, closable = true }: ModalProps) {
+  const handleClose = onClose ?? (() => {});
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape' && closable) handleClose();
     };
     document.addEventListener('keydown', onKey);
     const previous = document.body.style.overflow;
@@ -24,21 +26,23 @@ export function Modal({ open, title, description, onClose, children, footer, wid
       document.removeEventListener('keydown', onKey);
       document.body.style.overflow = previous;
     };
-  }, [open, onClose]);
+  }, [open, handleClose, closable]);
 
   if (!open) return null;
 
   return createPortal(
-    <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="overlay" onMouseDown={(event) => event.target === event.currentTarget && (closable && handleClose())}>
       <div className={wide ? 'modal wide' : 'modal'} role="dialog" aria-modal="true" aria-label={typeof title === 'string' ? title : undefined}>
         <div className="modal-head">
           <div>
             <h2>{title}</h2>
             {description ? <p>{description}</p> : null}
           </div>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng">
-            ×
-          </button>
+          {closable ? (
+            <button type="button" className="icon-btn" onClick={handleClose} aria-label="Đóng">
+              Đóng
+            </button>
+          ) : null}
         </div>
         <div className="modal-body">{children}</div>
         {footer ? <div className="modal-foot">{footer}</div> : null}
@@ -74,7 +78,7 @@ export function Drawer({ open, title, onClose, children }: DrawerProps) {
         <div className="modal-head">
           <h2>{title}</h2>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng">
-            ×
+            Đóng
           </button>
         </div>
         <div className="modal-body">{children}</div>

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '@/services/apiClient';
 import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
-import { Input } from '@/components/ui/Field';
+import { PasswordInput } from '@/components/ui/Field';
 import { Modal } from '@/components/ui/Modal';
 
 interface PasswordStrength {
@@ -25,10 +25,6 @@ function checkPasswordStrength(password: string): PasswordStrength {
   return { score: 1, label: 'Rất yếu', message: 'Mật khẩu quá yếu. Cần ít nhất 12 ký tự đa dạng.' };
 }
 
-function showPasswordLabel(visible: boolean): string {
-  return visible ? 'Ẩn mật khẩu' : 'Hiện mật khẩu';
-}
-
 export function PasswordChangeModal({
   open,
   onClose,
@@ -44,9 +40,6 @@ export function PasswordChangeModal({
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [currentVisible, setCurrentVisible] = useState(false);
-  const [newVisible, setNewVisible] = useState(false);
-  const [confirmVisible, setConfirmVisible] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const strength = checkPasswordStrength(newPassword);
@@ -76,19 +69,7 @@ export function PasswordChangeModal({
     }
   }
 
-  function resetForm() {
-    setCurrentPassword('');
-    setNewPassword('');
-    setCurrentVisible(false);
-    setNewVisible(false);
-    setConfirmVisible(false);
-    setConfirmPassword('');
-  }
-
   function handleClose() {
-    if (!force) {
-      resetForm();
-    }
     onClose();
   }
 
@@ -106,6 +87,7 @@ export function PasswordChangeModal({
         ? 'Đây là lần đầu đăng nhập. Vui lòng đặt mật khẩu mới để tiếp tục.'
         : 'Nhập mật khẩu hiện tại và mật khẩu mới.'}
       onClose={handleClose}
+      closable={!force}
       footer={
         <>
           <Button onClick={handleClose} disabled={busy} variant="ghost">
@@ -124,46 +106,22 @@ export function PasswordChangeModal({
     >
       <div className="stack">
         {!force ? (
-          <div style={{ position: 'relative' }}>
-            <Input
-              label="Mật khẩu hiện tại"
-              name="current_password"
-              type={currentVisible ? 'text' : 'password'}
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              required
-            />
-            <button
-              type="button"
-              className="icon-btn"
-              style={{ position: 'absolute', right: 'var(--sp-2)', top: 'var(--sp-2)' }}
-              onClick={() => setCurrentVisible(!currentVisible)}
-              aria-label={showPasswordLabel(currentVisible)}
-            >
-              {currentVisible ? 'Ẩn' : '👁'}
-            </button>
-          </div>
-        ) : null}
-        <div style={{ position: 'relative' }}>
-          <Input
-            label="Mật khẩu mới"
-            name="new_password"
-            type={newVisible ? 'text' : 'password'}
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
+          <PasswordInput
+            label="Mật khẩu hiện tại"
+            name="current_password"
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
             required
-            minLength={12}
           />
-          <button
-            type="button"
-            className="icon-btn"
-            style={{ position: 'absolute', right: 'var(--sp-2)', top: 'var(--sp-2)' }}
-            onClick={() => setNewVisible(!newVisible)}
-            aria-label={showPasswordLabel(newVisible)}
-          >
-            {newVisible ? 'Ẩn' : '👁'}
-          </button>
-        </div>
+        ) : null}
+        <PasswordInput
+          label="Mật khẩu mới"
+          name="new_password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          required
+          minLength={12}
+        />
         {newPassword ? (
           <div className="hint">
             Độ mạnh: {''}
@@ -172,27 +130,15 @@ export function PasswordChangeModal({
             {strength.message}
           </div>
         ) : null}
-        <div style={{ position: 'relative' }}>
-          <Input
-            label="Xác nhận mật khẩu mới"
-            name="confirm_password"
-            type={confirmVisible ? 'text' : 'password'}
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            required
-            minLength={12}
-            error={confirmPassword && !passwordsMatch ? 'Mật khẩu không khớp' : null}
-          />
-          <button
-            type="button"
-            className="icon-btn"
-            style={{ position: 'absolute', right: 'var(--sp-2)', top: 'var(--sp-2)' }}
-            onClick={() => setConfirmVisible(!confirmVisible)}
-            aria-label={showPasswordLabel(confirmVisible)}
-          >
-            {confirmVisible ? 'Ẩn' : '👁'}
-          </button>
-        </div>
+        <PasswordInput
+          label="Xác nhận mật khẩu mới"
+          name="confirm_password"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          required
+          minLength={12}
+          error={confirmPassword && !passwordsMatch ? 'Mật khẩu không khớp' : null}
+        />
       </div>
     </Modal>
   );

@@ -1,4 +1,4 @@
-import { useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes, useState } from 'react';
 
 interface FieldShellProps {
   label?: ReactNode;
@@ -70,6 +70,53 @@ export function Textarea({ label, hint, error, required, className = '', ...rest
         aria-invalid={error ? true : undefined}
         {...rest}
       />
+    </FieldShell>
+  );
+}
+
+type PasswordInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'id' | 'type'> & {
+  label?: ReactNode;
+  hint?: ReactNode;
+  error?: string | null;
+};
+
+export function PasswordInput({ label, hint, error, required, className = '', ...rest }: PasswordInputProps) {
+  const generated = useId();
+  const id = rest.name ? `field-${rest.name}` : generated;
+  const [visible, setVisible] = useState(false);
+  const inputId = `${id}-input`;
+  const toggleId = `${id}-toggle`;
+
+  return (
+    <FieldShell label={label} hint={hint} error={error} required={required} id={id}>
+      <div className="password-wrapper">
+        <input
+          id={inputId}
+          type={visible ? 'text' : 'password'}
+          className={`input password-input ${error ? 'invalid' : ''} ${className}`.trim()}
+          required={required}
+          aria-invalid={error ? true : undefined}
+          aria-label={rest['aria-label'] || (label ? String(label) : 'Mật khẩu')}
+          {...rest}
+        />
+        <button
+          id={toggleId}
+          type="button"
+          className="password-toggle"
+          aria-label={visible ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
+          aria-pressed={visible}
+          onClick={() => setVisible(!visible)}
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              setVisible(!visible);
+            }
+          }}
+        >
+          {visible ? 'Ẩn' : 'Hiện'}
+        </button>
+      </div>
     </FieldShell>
   );
 }

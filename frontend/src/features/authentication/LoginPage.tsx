@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Button } from '@/components/ui/Button';
-import { Input } from '@/components/ui/Field';
+import { Input, PasswordInput } from '@/components/ui/Field';
 import { Alert } from '@/components/ui/Surfaces';
 
 interface LoginPageProps {
@@ -57,10 +57,9 @@ export function LoginPage({ onSignIn }: LoginPageProps) {
               onChange={(event) => setUsername(event.target.value)}
               required
             />
-            <Input
+            <PasswordInput
               label="Mật khẩu"
               name="password"
-              type="password"
               autoComplete="current-password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
