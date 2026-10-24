@@ -208,6 +208,45 @@ export interface JobRow {
   failure_reason: string;
 }
 
+export interface ScheduledPostRow {
+  id: number;
+  pipeline_id: number;
+  body: string;
+  media_json: string;
+  created_at: string;
+  anonymous_only: number;
+  ai_record_id?: number | null;
+  job_count: number;
+  pending_count: number;
+  posted_count: number;
+  failed_count: number;
+  first_scheduled: string | null;
+  last_scheduled: string | null;
+}
+
+export interface PostJobRow {
+  id: number;
+  state: string;
+  posting_status: string;
+  requested_posting_mode: string;
+  requested_nickname: string;
+  actual_posting_identity: string;
+  verification_status: string;
+  details: string;
+  evidence: string;
+  scheduled_at: string;
+  updated_at: string;
+  group_name: string;
+  group_url: string;
+  group_mode: string;
+  group_nickname: string;
+  account_name: string;
+  fb_name: string;
+  failure_reason: string;
+  permalink: string;
+  published_at: string | null;
+}
+
 export interface ManualTask {
   id: number;
   task_type: string;

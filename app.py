@@ -1761,6 +1761,12 @@ class JobReview(BaseModel):
     details: str = Field(default="", max_length=1000)
 
 
+class PostUpdate(BaseModel):
+    body: str | None = Field(default=None, max_length=20000)
+    media_json: list[str] | None = Field(default=None, min_length=1, max_length=4)
+    group_ids: list[int] | None = Field(default=None, min_length=0)
+
+
 def pid_active(pid: int | None, account_id: int) -> bool:
     if not pid or pid < 2:
         return False
@@ -5293,6 +5299,152 @@ def get_jobs(pipeline_id: int | None = None, limit: int = 100, principal: Princi
         sql += " ORDER BY j.id DESC LIMIT ?"
         params.append(limit)
         return [dict(row) for row in conn.execute(sql, params)]
+
+
+@app.get("/api/pipelines/{pipeline_id}/posts")
+def list_posts(pipeline_id: int, state: str | None = None, limit: int = 100,
+               search: str | None = None, principal: Principal = Depends(require_principal)):
+    """List posts (campaigns) with aggregate job info for the scheduled-posts tab.
+
+    Optional ``state`` filter narrows to posts that have at least one job in
+    the given state.  Optional ``search`` filters on the post body / group names.
+    """
+    require_permission(principal, "history.view")
+    scope_pipeline(principal, pipeline_id)
+    limit = min(300, max(1, limit))
+    with db() as conn:
+        sql = """
+            SELECT p.id, p.pipeline_id, p.body, p.media_json, p.created_at, p.anonymous_only,
+                   p.ai_record_id,
+                   (SELECT COUNT(*) FROM jobs WHERE post_id=p.id) AS job_count,
+                   (SELECT COUNT(*) FROM jobs WHERE post_id=p.id AND state IN ('queued','running','submitted_unverified')) AS pending_count,
+                   (SELECT COUNT(*) FROM jobs WHERE post_id=p.id AND state='posted') AS posted_count,
+                   (SELECT COUNT(*) FROM jobs WHERE post_id=p.id AND state IN ('failed','needs_review','cancelled')) AS failed_count,
+                   (SELECT MIN(scheduled_at) FROM jobs WHERE post_id=p.id) AS first_scheduled,
+                   (SELECT MAX(scheduled_at) FROM jobs WHERE post_id=p.id) AS last_scheduled
+            FROM posts p
+            WHERE p.pipeline_id=?
+        """
+        params = [pipeline_id]
+        conditions = []
+        if state:
+            if state == "scheduled":
+                conditions.append("(SELECT COUNT(*) FROM jobs WHERE post_id=p.id AND state IN ('queued','pending_approval')) > 0")
+            elif state == "needs_review":
+                conditions.append("EXISTS (SELECT 1 FROM jobs WHERE post_id=p.id AND state IN ('needs_review'))")
+            elif state == "processing":
+                conditions.append("EXISTS (SELECT 1 FROM jobs WHERE post_id=p.id AND state IN ('running','submitted_unverified'))")
+            elif state == "posted":
+                conditions.append("NOT EXISTS (SELECT 1 FROM jobs WHERE post_id=p.id AND state NOT IN ('posted','cancelled'))")
+            elif state == "failed":
+                conditions.append("EXISTS (SELECT 1 FROM jobs WHERE post_id=p.id AND state='failed')")
+            elif state == "cancelled":
+                conditions.append("EXISTS (SELECT 1 FROM jobs WHERE post_id=p.id AND state='cancelled')")
+        if search:
+            conditions.append("(p.body LIKE ? OR EXISTS (SELECT 1 FROM jobs j JOIN groups g ON g.id=j.group_id WHERE j.post_id=p.id AND (g.label LIKE ? OR g.url LIKE ?)))")
+            params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+        if conditions:
+            sql += " AND " + " AND ".join(conditions)
+        sql += " ORDER BY first_scheduled DESC LIMIT ?"
+        params.append(limit)
+        return [dict(row) for row in conn.execute(sql, params)]
+
+
+@app.get("/api/posts/{post_id}/jobs")
+def list_post_jobs(post_id: int, principal: Principal = Depends(require_principal)):
+    """List all jobs (per-group) belonging to one post, scoped to the caller's pipeline."""
+    require_permission(principal, "history.view")
+    with db() as conn:
+        post = scoped_entry(conn, "posts", post_id, principal)
+        if post is None:
+            raise HTTPException(404, "Not found")
+        scope_pipeline(principal, post["pipeline_id"])
+        sql = """SELECT j.*, g.label group_name, g.url group_url, g.posting_mode group_mode,
+                        g.nickname group_nickname, a.label account_name, a.fb_name
+                 FROM jobs j JOIN groups g ON j.group_id=g.id JOIN accounts a ON j.account_id=a.id
+                 WHERE j.post_id=? ORDER BY j.id"""
+        return [dict(row) for row in conn.execute(sql, (post_id,))]
+
+
+@app.patch("/api/posts/{post_id}")
+def update_post(post_id: int, data: PostUpdate, principal: Principal = Depends(require_principal)):
+    """Edit caption, media, or target groups of a post whose jobs are all still editable.
+
+    Only jobs in 'queued' or 'pending_approval' state may be updated. Once a job
+    has started (running, submitted_unverified, posted, failed) the post is locked.
+    """
+    require_permission(principal, "group_posts.create")
+    with db() as conn:
+        post = scoped_entry(conn, "posts", post_id, principal)
+        if post is None:
+            raise HTTPException(404, "Not found")
+        scope_pipeline(principal, post["pipeline_id"])
+        locked = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE post_id=? AND state NOT IN ('queued','pending_approval')",
+            (post_id,)).fetchone()[0]
+        if locked > 0:
+            raise HTTPException(409, "Bài đã bắt đầu xử lý; không thể sửa")
+        updates = []
+        params = []
+        if data.body is not None:
+            updates.append("body=?")
+            params.append(data.body)
+        if data.media_json is not None:
+            for filename in data.media_json:
+                try:
+                    media_file(conn, filename, principal)
+                except HTTPException as error:
+                    raise HTTPException(422, f"Ảnh không hợp lệ: {filename}") from error
+            updates.append("media_json=?")
+            params.append(json.dumps(data.media_json))
+        if data.group_ids is not None:
+            existing = {row["group_id"] for row in conn.execute("SELECT group_id FROM jobs WHERE post_id=?", (post_id,))}
+            new_groups = set(data.group_ids)
+            for removed in existing - new_groups:
+                conn.execute("DELETE FROM jobs WHERE post_id=? AND group_id=?", (post_id, removed))
+                audit("job", None, f"Removed group {removed}", post["pipeline_id"])
+            for added in sorted(new_groups - existing):
+                group = scoped_entry(conn, "groups", added, principal)
+                if group is None or int(group["pipeline_id"]) != int(post["pipeline_id"]):
+                    raise HTTPException(404, f"Group {added} not found")
+                account = scoped_entry(conn, "accounts", group["account_id"], principal)
+                if account is None or int(account["pipeline_id"]) != int(post["pipeline_id"]):
+                    raise HTTPException(404, f"Account for group {added} not found")
+                if not group["enabled"] or not account["enabled"]:
+                    raise HTTPException(409, f"Group or account disabled: {added}")
+                if not group["approved_target"]:
+                    raise HTTPException(409, f"Confirm permission to publish in group {added} first")
+                conn.execute("""INSERT INTO jobs(post_id,group_id,account_id,pipeline_id,state,details,scheduled_at,updated_at)
+                                VALUES(?,?,?,?,?,?,?,?)""",
+                             (post_id, added, account["id"], post["pipeline_id"], "queued", "",
+                              iso(), iso()))
+                audit("job", None, f"Added group {added}", post["pipeline_id"])
+        if updates:
+            updates.append("updated_at=?")
+            params.append(iso())
+            params.append(post_id)
+            conn.execute(f"UPDATE posts SET {', '.join(updates)} WHERE id=?", params)
+    audit("post", post_id, "Updated post", post["pipeline_id"])
+    return {"ok": True, "post_id": post_id}
+
+
+@app.patch("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: int, principal: Principal = Depends(require_principal)):
+    """Soft-cancel a job that has not started yet."""
+    require_permission(principal, "group_posts.publish")
+    with db() as conn:
+        job = scoped_entry(conn, "jobs", job_id, principal)
+        if job is None:
+            raise HTTPException(404, "Not found")
+        scope_pipeline(principal, job["pipeline_id"])
+        if job["state"] in ("running", "posted"):
+            raise HTTPException(409, "Không thể hủy bài đã đăng hoặc đang xử lý")
+        if job["state"] == "cancelled":
+            raise HTTPException(409, "Bài này đã được hủy trước đó")
+        conn.execute("""UPDATE jobs SET state='cancelled', details=?, updated_at=? WHERE id=?""",
+                     (f"Đã hủy bởi {principal.username} lúc {iso()}", iso(), job_id))
+    audit("job", job_id, f"Cancelled by {principal.username}", job["pipeline_id"])
+    return {"ok": True}
 
 
 @app.post("/api/jobs/{job_id}/review")

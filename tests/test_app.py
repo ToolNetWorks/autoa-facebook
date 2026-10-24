@@ -111,6 +111,63 @@ def test_full_pipeline_flow(client):
     assert client.get('/api/jobs').json()[0]['state'] == 'cancelled'
 
 
+def test_scheduled_posts_list_and_cancel(client):
+    create = client.post('/api/pipelines', json={'name': '@schedule-test'})
+    assert create.status_code == 201
+    pipeline_id = create.json()['id']
+    account = client.post('/api/accounts', json={'pipeline_id': pipeline_id, 'label': 'FB 1'})
+    account_id = account.json()['id']
+    link = 'https://www.facebook.com/groups/789012/?ref=share'
+    group = client.post('/api/groups', json={'pipeline_id': pipeline_id, 'account_id': account_id,
+                                             'label': 'Group A', 'url': link,
+                                             'approved_target': True})
+    assert group.status_code == 201
+    group_id = group.json()['id']
+    image = client.post('/api/uploads', params={'pipeline_id': pipeline_id},
+                        files={'file': ('photo.jpg', b'\xff\xd8\xff' + b'\x00' * 90, 'image/jpeg')})
+    image_path = image.json()['path']
+    future = m.iso(m.now() + timedelta(hours=5))
+    post = client.post('/api/posts', json={'pipeline_id': pipeline_id, 'body': 'Test post',
+                                           'group_ids': [group_id], 'media': [image_path],
+                                           'anonymous_only': True, 'scheduled_at': future})
+    assert post.status_code == 201
+
+    # List scheduled posts for pipeline
+    listed = client.get(f'/api/pipelines/{pipeline_id}/posts').json()
+    assert len(listed) == 1
+    assert listed[0]['body'] == 'Test post'
+    assert listed[0]['job_count'] == 1
+
+    # Filter by scheduled state
+    scheduled = client.get(f'/api/pipelines/{pipeline_id}/posts?state=scheduled').json()
+    assert len(scheduled) == 1
+
+    # Get jobs for this post
+    post_id = post.json()['id']
+    jobs = client.get(f'/api/posts/{post_id}/jobs').json()
+    assert len(jobs) == 1
+    assert jobs[0]['state'] == 'queued'
+    assert jobs[0]['group_name'] == 'Group A'
+
+    # Cancel via new endpoint
+    job_id = jobs[0]['id']
+    cancel_resp = client.patch(f'/api/jobs/{job_id}/cancel')
+    assert cancel_resp.status_code == 200
+    assert client.get('/api/jobs').json()[0]['state'] == 'cancelled'
+
+    # Cannot cancel a cancelled job
+    assert client.patch(f'/api/jobs/{job_id}/cancel').status_code == 409
+
+    # Cannot edit a post that has jobs past queued state
+    update = client.patch(f'/api/posts/{post_id}', json={'body': 'Edited'})
+    assert update.status_code == 409
+
+    # Pipeline isolation: other pipeline does not see this post
+    other = client.post('/api/pipelines', json={'name': '@other'})
+    other_id = other.json()['id']
+    assert client.get(f'/api/pipelines/{other_id}/posts').json() == []
+
+
 def test_link_validation(client):
     for bad in ('http://www.facebook.com/groups/2', 'https://evil.com/groups/2',
                 'https://facebook.com/groups/2/posts/3', 'https://facebook.com.evil.org/groups/2'):

@@ -1186,8 +1186,75 @@ table.data td.actions {
   font-weight: 600;
   line-height: 1.35;
 }
+/* --- group post tabs and filters ------------------------------------------- */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.filter-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  background: var(--surface-2);
+  border-radius: var(--r-sm);
+  padding: 4px;
+}
+
+.filter {
+  border: 0;
+  background: transparent;
+  padding: 5px 10px;
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--r-xs);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+  white-space: nowrap;
+}
+
+.filter:hover {
+  color: var(--text);
+}
+
+.filter.active {
+  background: var(--surface);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+}
+
+.search-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-end;
+}
+
+.search-input {
+  max-width: 200px;
+}
+
+.post-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.post-body {
+  font-size: var(--fs-13);
+  color: var(--text);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 
 /* --- pipeline wide auto posting ---------------------------------------------- */
+
 .choice-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
