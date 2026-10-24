@@ -15,7 +15,7 @@ from typing import Any
 from playwright.async_api import BrowserContext
 
 
-def atomic_storage_state(context: BrowserContext, destination: str | Path) -> None:
+async def atomic_storage_state(context: BrowserContext, destination: str | Path) -> None:
     """Lưu trạng thái trình duyệt ra tệp một cách nguyên tử.
 
     ``destination`` là tệp cuối cùng. Dữ liệu được ghi vào tệp tạm cùng thư
@@ -25,7 +25,7 @@ def atomic_storage_state(context: BrowserContext, destination: str | Path) -> No
     dest.parent.mkdir(parents=True, exist_ok=True)
     temp_path = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
     try:
-        context.storage_state(path=str(temp_path))
+        await context.storage_state(path=str(temp_path))
         os.replace(temp_path, dest)
     finally:
         try:

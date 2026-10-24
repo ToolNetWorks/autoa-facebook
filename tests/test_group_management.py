@@ -7,6 +7,7 @@ from test_app import AuthClient, client  # noqa: F401 (registers the client fixt
 
 import app as m
 import fb_browser
+from services import posting_mode
 from services.group_links import InvalidGroupLink, normalize_group_url
 
 
@@ -146,62 +147,70 @@ def test_nickname_mode_requires_a_nickname(client):
 # --- 5. and 6. the anonymous mode is enforced or the post stops ------------
 
 def test_anonymous_identity_is_accepted_when_verified(monkeypatch):
-    monkeypatch.setattr(fb_browser, "require_anonymous_mode", lambda page: _true())
+    async def fake_anonymous(page):
+        return True
+    monkeypatch.setattr(posting_mode, "require_anonymous_mode", fake_anonymous)
     identity, verification, error = asyncio.run(
-        fb_browser.enforce_posting_identity(None, "anonymous", ""))
+        posting_mode.enforce_posting_identity(None, 1, 1, 1, "anonymous", ""))
     assert identity == "anonymous"
     assert verification == "verified"
     assert error == ""
 
 
 def test_anonymous_post_stops_when_the_mode_cannot_be_verified(monkeypatch):
-    monkeypatch.setattr(fb_browser, "require_anonymous_mode", lambda page: _false())
+    async def fake_anonymous(page):
+        return False
+    monkeypatch.setattr(posting_mode, "require_anonymous_mode", fake_anonymous)
     identity, verification, error = asyncio.run(
-        fb_browser.enforce_posting_identity(None, "anonymous", ""))
+        posting_mode.enforce_posting_identity(None, 1, 1, 1, "anonymous", ""))
     assert identity == ""
     assert verification == "not_verified"
-    assert "tên thật" in error
+    assert "tên thật" in error.lower()
 
 
 # --- 7. and 8. the nickname identity ----------------------------------------
 
 def test_valid_nickname_is_selected(monkeypatch):
-    async def fake(page, nickname):
-        return "Hội giao lưu", ["Hội giao lưu", "Tên thật"]
-    monkeypatch.setattr(fb_browser, "require_nickname_identity", fake)
+    async def fake(page, pipeline_id, account_id, group_id, configured_nickname):
+        return "Hội giao lưu", ["Hội giao lưu", "Tên thật"], "saved"
+    monkeypatch.setattr(posting_mode, "require_nickname_identity", fake)
     identity, verification, error = asyncio.run(
-        fb_browser.enforce_posting_identity(None, "nickname", "Hội giao lưu"))
+        posting_mode.enforce_posting_identity(None, 1, 1, 1, "nickname", "Hội giao lưu"))
     assert identity == "Hội giao lưu"
     assert verification == "verified"
     assert error == ""
 
 
 def test_post_stops_when_the_nickname_is_not_available(monkeypatch):
-    async def fake(page, nickname):
-        return "", ["Tên thật", "Nickname khác"]
-    monkeypatch.setattr(fb_browser, "require_nickname_identity", fake)
+    async def fake(page, pipeline_id, account_id, group_id, configured_nickname):
+        return "", ["Tên thật", "Nickname khác"], "not_found"
+    monkeypatch.setattr(posting_mode, "require_nickname_identity", fake)
     identity, verification, error = asyncio.run(
-        fb_browser.enforce_posting_identity(None, "nickname", "Hội giao lưu"))
+        posting_mode.enforce_posting_identity(None, 1, 1, 1, "nickname", "Hội giao lưu"))
     assert identity == ""
     assert verification == "not_verified"
-    assert "tên thật" in error
+    assert "tên thật" in error.lower()
 
 
 # --- 9. there is never a fallback to the real name -------------------------
 
 def test_no_fallback_to_the_profile_name(monkeypatch):
-    async def fake(page, nickname):
-        return "", []
-    monkeypatch.setattr(fb_browser, "require_nickname_identity", fake)
-    monkeypatch.setattr(fb_browser, "require_anonymous_mode", lambda page: _false())
+    async def fake_nickname(page, pipeline_id, account_id, group_id, configured_nickname):
+        return "", [], "not_found"
+    async def fake_anonymous(page):
+        return False
+    monkeypatch.setattr(posting_mode, "require_nickname_identity", fake_nickname)
+    monkeypatch.setattr(posting_mode, "require_anonymous_mode", fake_anonymous)
     for mode, nickname in (("nickname", "X"), ("anonymous", "")):
-        identity, _, error = asyncio.run(fb_browser.enforce_posting_identity(None, mode, nickname))
+        identity, _, error = asyncio.run(
+            posting_mode.enforce_posting_identity(None, 1, 1, 1, mode, nickname))
         assert identity == ""
         assert error
 
 
 def test_unknown_mode_is_refused(monkeypatch):
-    identity, _, error = asyncio.run(fb_browser.enforce_posting_identity(None, "real_name", ""))
+    identity, _, error = asyncio.run(
+        posting_mode.enforce_posting_identity(None, 1, 1, 1, "real_name", ""))
     assert identity == ""
     assert "không hợp lệ" in error
 
@@ -345,13 +354,13 @@ def test_existing_data_survives_the_migration(client):
 
 # --- helpers -----------------------------------------------------------------
 
-def _true():
+def _async_true():
     async def value():
         return True
     return value()
 
 
-def _false():
+def _async_false():
     async def value():
         return False
     return value()

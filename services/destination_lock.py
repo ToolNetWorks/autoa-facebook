@@ -63,6 +63,38 @@ class DestinationLock:
         return username
 
 
+def ensure_schema(conn) -> None:
+    """Create the destination_locks table if it does not exist.
+
+    This migration is additive and idempotent. The table stores per-Pipeline
+    contact-address locks (e.g. a fixed Telegram username). The schema mirrors
+    the production DDL referenced by DestinationLockService.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(destination_locks)")}
+    if columns:
+        return
+    conn.execute("""
+        CREATE TABLE destination_locks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline_id INTEGER NOT NULL,
+            platform TEXT NOT NULL,
+            destination_username TEXT NOT NULL,
+            display_label TEXT NOT NULL,
+            allowed_labels_json TEXT NOT NULL,
+            is_locked INTEGER NOT NULL DEFAULT 1,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            updated_by INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(pipeline_id, platform, destination_username)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_destination_locks_pipeline "
+        "ON destination_locks(pipeline_id, is_enabled)"
+    )
+
+
 @dataclass
 class DestinationLockService:
     """Service quản lý Destination Lock cho các Pipeline."""

@@ -74,8 +74,12 @@ def eligible_groups(groups: list[dict], account_id: int | None = None,
 
 
 def create_caption(description: str, tags: list[str], topic: str,
-                   provider_config=None) -> dict:
-    """Write a caption for the picture and check it."""
+                   provider_config=None, posting_mode: str = "") -> dict:
+    """Write a caption for the picture and check it.
+
+    ``posting_mode`` is the group's actual posting mode ('anonymous' or
+    'nickname') so the AI prompt reflects the identity that will be used.
+    """
     provider_config = provider_config or ai_provider.load_config()
     result = {"caption": "", "source": "topic", "status": "pass", "reasons": [], "hashtags": []}
     subject = (topic or "").strip()
@@ -87,11 +91,12 @@ def create_caption(description: str, tags: list[str], topic: str,
         return result
     if provider_config.configured:
         try:
+            mode_label = "ẩn danh" if (posting_mode or "").strip().lower() == MODE_ANONYMOUS else "biệt danh"
             answer = ai_provider.chat_json(
                 "Bạn viết caption Facebook bằng tiếng Việt.",
                 CAPTION_PROMPT + f"\nMô tả ảnh: {description[:800]}\n"
                 f"Thẻ: {', '.join(tags[:10])}\nChủ đề: {subject}\n"
-                f"Chế độ đăng: {'ẩn danh' if MODE_ANONYMOUS else 'biệt danh'}",
+                f"Chế độ đăng: {mode_label}",
                 provider_config)
             caption = str(answer.get("caption", "")).strip()
             hashtags = [str(tag)[:40] for tag in (answer.get("hashtags") or [])][:8]

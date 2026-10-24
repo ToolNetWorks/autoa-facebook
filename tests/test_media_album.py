@@ -137,7 +137,8 @@ def test_caption_is_written_for_the_picture(monkeypatch):
                         lambda *a, **k: {"caption": "Chiếc túi da mới về, mời bạn xem nhé",
                                           "hashtags": ["tui"], "reason": "theo mô tả ảnh"})
     result = auto_posting.create_caption("một chiếc túi da nâu", ["tui"], "túi da mới",
-                                         ai_provider.ProviderConfig(base_url="https://x/v1", api_key="k"))
+                                         ai_provider.ProviderConfig(base_url="https://x/v1", api_key="k"),
+                                         posting_mode="anonymous")
     assert result["caption"].startswith("Chiếc túi da")
     assert result["status"] == "pass"
 
@@ -148,7 +149,8 @@ def test_caption_of_a_risky_picture_is_blocked(monkeypatch):
                         lambda *a, **k: {"caption": "Cam kết hoàn tiền 100% hiệu quả, không rủi ro",
                                           "hashtags": [], "reason": ""})
     result = auto_posting.create_caption("một sản phẩm", [], "sản phẩm",
-                                         ai_provider.ProviderConfig(base_url="https://x/v1", api_key="k"))
+                                         ai_provider.ProviderConfig(base_url="https://x/v1", api_key="k"),
+                                         posting_mode="anonymous")
     assert result["status"] == "blocked"
 
 

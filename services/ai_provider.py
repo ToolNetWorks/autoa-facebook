@@ -1,4 +1,4 @@
-"""A small OpenAI-compatible client for the text, vision and audio models.
+"""A small OpenAI-compatible client for the text and vision models.
 
 The gateway in use answers with a normal chat completion body and sometimes
 appends the stream terminator, so the reader accepts both. Nothing is sent
@@ -9,10 +9,6 @@ Real error tracing (2026-10-20):
   which is an *embedding* model, not a chat/vision model.  The gateway could
   not find it and fell back to the deprecated ``opencode/mimo-v2.5-free``,
   returning HTTP 410.
-- ``AI_ASR_MODEL`` was set to ``alims-intl/cosyvoice-v3-plus`` which does not
-  exist.  Additionally the alims-intl provider rejects ``audio_url`` content;
-  it accepts ``video_url`` / ``video`` instead, so the audio must be wrapped
-  in a minimal MP4 container before it can be transcribed.
 """
 from __future__ import annotations
 
@@ -20,7 +16,6 @@ import base64
 import json
 import logging
 import os
-import shutil
 import subprocess
 import time
 import urllib.error
@@ -46,7 +41,6 @@ class ProviderConfig:
     api_key: str = ""
     model: str = DEFAULT_MODEL
     vision_model: str = ""
-    asr_model: str = ""
     timeout: int = DEFAULT_TIMEOUT
     max_retries: int = DEFAULT_MAX_RETRIES
 
@@ -57,10 +51,6 @@ class ProviderConfig:
     @property
     def vision_configured(self) -> bool:
         return self.configured and bool(self.vision_model)
-
-    @property
-    def asr_configured(self) -> bool:
-        return self.configured and bool(self.asr_model)
 
 
 # --- model capability discovery -----------------------------------------------
@@ -143,9 +133,7 @@ def load_config(model_override: str = "", vision_override: str = "") -> Provider
     api_key = (os.getenv("AI_API_KEY") or os.getenv("AI_KEY") or "").strip()
     model = (model_override or os.getenv("AI_MODEL") or DEFAULT_MODEL).strip()
     vision = (vision_override or os.getenv("AI_VISION_MODEL") or "").strip()
-    asr = (os.getenv("AI_ASR_MODEL") or "").strip()
     return ProviderConfig(base_url=base_url, api_key=api_key, model=model, vision_model=vision,
-                          asr_model=asr,
                           timeout=_int_env("AI_TIMEOUT", DEFAULT_TIMEOUT, 5, 600),
                           max_retries=_int_env("AI_MAX_RETRIES", DEFAULT_MAX_RETRIES, 0, 5))
 
@@ -250,79 +238,5 @@ def vision_json(system_prompt: str, user_prompt: str, image_paths, config: Provi
         content.append({"type": "image_url", "image_url": {"url": image_data_url(Path(path))}})
     payload = {"model": model or config.vision_model, "messages": [{"role": "user", "content": content}],
                "temperature": 0.1}
-    answer = _post(config, payload, timeout or config.timeout)
-    return extract_json(answer)
-
-
-FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-
-
-def _wrap_audio_in_video(audio_path: Path, work_dir: Path) -> Path:
-    """Wrap an audio file in a minimal MP4 container (silent black frame + audio).
-
-    Some providers (alims-intl) only accept ``video_url`` / ``video`` content
-    types, never ``audio_url``.  We create a 1-frame 16x9 black video at 1 fps
-    with the audio track muxed in so the model can read both.
-    """
-    work_dir = Path(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-    target = work_dir / "audio_for_asr.mp4"
-    subprocess.run(
-        [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
-         "-f", "lavfi", "-i", "color=c=black:s=16x9:r=1",
-         "-i", str(audio_path),
-         "-c:v", "libx264", "-tune", "stillimage",
-         "-c:a", "aac", "-b:a", "64k", "-shortest",
-         "-frames:v", "1", "-y", str(target)],
-        capture_output=True, timeout=30)
-    if target.is_file() and target.stat().st_size > 1024:
-        return target
-    return audio_path
-
-
-def transcribe_json(audio_path: Path, config: ProviderConfig, timeout: int = 0,
-                    work_dir: Path | None = None) -> dict:
-    """Transcribe an audio file with the configured ASR model.
-
-    The gateway exposes transcription as a chat model.  Alims-intl providers
-    reject ``audio_url`` and require ``video_url`` / ``video``, so the audio is
-    wrapped in a minimal MP4 container before being sent.  When no ASR model
-    is configured the caller must treat the audio as not checked.
-    """
-    if not config.asr_configured:
-        raise ProviderError("AI ASR model is not configured")
-    audio_path = Path(audio_path)
-    # Determine whether the configured model accepts audio_input.
-    caps = discover_models(config)
-    model_info = caps.get(config.asr_model, {})
-    if not model_info:
-        # Cannot verify capabilities — still try, but caller should handle errors.
-        LOG.warning("ASR model %s capabilities unknown, attempting anyway", config.asr_model)
-
-    # Wrap audio in video if it's not already a video container.
-    if audio_path.suffix.lower() not in (".mp4", ".mov", ".m4v", ".mkv"):
-        wrap_dir = Path(work_dir or audio_path.parent)
-        video_path = _wrap_audio_in_video(audio_path, wrap_dir)
-        encoded = base64.b64encode(video_path.read_bytes()).decode("ascii")
-        media_type = "video/mp4"
-        content_type = "video_url"
-    else:
-        encoded = base64.b64encode(audio_path.read_bytes()).decode("ascii")
-        media_type = "audio/wav"
-        content_type = "video_url"
-
-    payload = {"model": config.asr_model,
-               "messages": [{"role": "user", "content": [
-                   {"type": "text",
-                    "text": ("Transcribe the speech in this audio/video. "
-                             "If no speech is detectable, set speech_detected to false. "
-                             "Return JSON: {\"speech_detected\": true, "
-                             "\"text\": \"full transcript\", "
-                             "\"risks\": [{\"time\": 0.0, "
-                             "\"category\": \"none|abusive|offensive|misleading|sensitive|inappropriate\", "
-                             "\"note\": \"short description\"}]})")},
-                   {content_type: {"url": f"data:{media_type};base64,{encoded}"}}
-               ]}],
-               "temperature": 0}
     answer = _post(config, payload, timeout or config.timeout)
     return extract_json(answer)

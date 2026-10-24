@@ -62,6 +62,7 @@ export const ADMIN_NAV: NavEntry[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'collaborators', label: 'CTV & phân quyền' },
   { id: 'access-keys', label: 'Pipeline Key' },
+  { id: 'security', label: 'Bảo mật' },
   { id: 'audit', label: 'Nhật ký' },
 ];
 

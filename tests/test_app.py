@@ -1,4 +1,5 @@
 import os
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
@@ -35,6 +36,35 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(m, 'PROFILES', tmp_path / 'profiles')
     for folder in (m.UPLOADS, m.EVIDENCE, m.PROFILES):
         folder.mkdir(parents=True, exist_ok=True)
+    
+    # Create the destination_locks table in the test database
+    import sqlite3
+    conn = sqlite3.connect(str(m.DB_PATH), timeout=25)
+    try:
+        # Check if destination_locks table exists
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='destination_locks'")
+        if cursor.fetchone() is None:
+            # Create destination_locks table
+            conn.execute("""
+                CREATE TABLE destination_locks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pipeline_id INTEGER NOT NULL,
+                    platform TEXT NOT NULL,
+                    destination_username TEXT NOT NULL,
+                    display_label TEXT NOT NULL,
+                    allowed_labels_json TEXT NOT NULL,
+                    is_locked INTEGER NOT NULL DEFAULT 1,
+                    is_enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(pipeline_id, platform, destination_username)
+                )
+            """)
+            conn.commit()
+    finally:
+        conn.close()
+    
     with AuthClient(m.app) as c:
         login = c.post('/api/auth/login', json={"username": "admin", "password": os.environ['APP_PASSWORD']})
         assert login.status_code == 200, login.text

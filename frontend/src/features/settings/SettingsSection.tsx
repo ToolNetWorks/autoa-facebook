@@ -1,18 +1,22 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '@/services/apiClient';
+import { useAuth } from '@/app/AuthProvider';
 import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Input, Textarea } from '@/components/ui/Field';
 import { Alert, Card } from '@/components/ui/Surfaces';
+import { PasswordChangeModal } from '@/features/admin-dashboard/PasswordChangeModal';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
 export function SettingsSection({ workspace }: { workspace: WorkspaceData }) {
   const { push } = useToast();
+  const { refresh } = useAuth();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
 
   useEffect(() => {
     const pipeline = workspace.pipeline;
@@ -25,7 +29,7 @@ export function SettingsSection({ workspace }: { workspace: WorkspaceData }) {
   async function save() {
     setBusy(true);
     try {
-      await api.patch(`/api/pipelines/${workspace.pipelineId}`, { enabled });
+      await api.patch(`/api/pipelines/${workspace.pipelineId}`, { enabled, description });
       push('Đã lưu cài đặt Workspace', 'success');
       workspace.reloadAll();
     } catch (failure) {
@@ -62,9 +66,23 @@ export function SettingsSection({ workspace }: { workspace: WorkspaceData }) {
         </div>
       </Card>
 
+      <Card title="Bảo mật" description="Quản lý mật khẩu đăng nhập.">
+        <div className="stack">
+          <Button variant="ghost" size="sm" onClick={() => setChangePasswordOpen(true)}>
+            Đổi mật khẩu
+          </Button>
+        </div>
+      </Card>
+
       <Alert tone="info">
         Tên pipeline không thể đổi sau khi tạo. Muốn đổi hãy tạo pipeline mới và chuyển dữ liệu.
       </Alert>
+
+      <PasswordChangeModal
+        open={changePasswordOpen}
+        onClose={() => setChangePasswordOpen(false)}
+        onPasswordChanged={() => { void refresh(); }}
+      />
     </div>
   );
 }

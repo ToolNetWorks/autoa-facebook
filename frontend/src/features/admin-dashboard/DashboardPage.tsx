@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '@/services/apiClient';
 import { useAsync } from '@/hooks/useAsync';
@@ -14,6 +14,7 @@ import { Input, Textarea } from '@/components/ui/Field';
 import { Modal } from '@/components/ui/Modal';
 import { Badge, EmptyState, ErrorState, Skeleton, Stat } from '@/components/ui/Surfaces';
 import type { PipelineAdminRow } from '@/types/api';
+import { PasswordChangeModal } from '@/features/admin-dashboard/PasswordChangeModal';
 
 function PipelineCard({
   row,
@@ -89,8 +90,9 @@ const emptyKpis: AnalyticsKpis = {
 
 export function DashboardPage() {
   const navigate = useNavigate();
-  const { signOut } = useAuth();
+  const { signOut, session, refresh } = useAuth();
   const { push } = useToast();
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const state = useAsync<PipelineAdminRow[]>((signal) => api.get('/api/admin/pipelines', signal), []);
   const analytics = useAsync<{ kpis: AnalyticsKpis }>(
     (signal) => api.get('/api/admin/analytics/overview', signal),
@@ -126,6 +128,21 @@ export function DashboardPage() {
   }
 
   const rows = state.data ?? [];
+  const forcePasswordChange = session?.must_change_password ?? false;
+
+  useEffect(() => {
+    if (forcePasswordChange) {
+      setChangePasswordOpen(true);
+    }
+  }, [forcePasswordChange]);
+
+  async function handlePasswordChanged() {
+    await refresh();
+  }
+
+  function openChangePassword() {
+    setChangePasswordOpen(true);
+  }
 
   return (
     <AppShell
@@ -143,6 +160,9 @@ export function DashboardPage() {
           </Button>
           <Button size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
             Tạo pipeline
+          </Button>
+          <Button size="sm" variant="ghost" onClick={openChangePassword}>
+            Đổi mật khẩu
           </Button>
           <Button size="sm" variant="ghost" onClick={() => void signOut()}>
             Đăng xuất
@@ -236,7 +256,13 @@ export function DashboardPage() {
           value={description}
           onChange={(event) => setDescription(event.target.value)}
         />
-      </Modal>
+       </Modal>
+      <PasswordChangeModal
+        open={changePasswordOpen}
+        onClose={() => setChangePasswordOpen(false)}
+        onPasswordChanged={handlePasswordChanged}
+        force={forcePasswordChange}
+      />
     </AppShell>
   );
 }

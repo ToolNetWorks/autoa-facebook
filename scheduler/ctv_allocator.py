@@ -276,7 +276,8 @@ def plan_for_owner(conn, pipeline_id: int, settings: dict, moment: datetime | No
             break
         caption_result = create_caption(picture.get("description") or "",
                                         list(picture.get("tags") or []),
-                                        settings.get("topic", ""), provider_config)
+                                        settings.get("topic", ""), provider_config,
+                                        posting_mode=chosen_group.get("posting_mode") or "anonymous")
         if caption_result.get("status") == "blocked":
             notes.append("Caption bị chặn vì nội dung rủi ro")
             continue

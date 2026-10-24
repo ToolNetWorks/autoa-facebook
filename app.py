@@ -80,6 +80,7 @@ from services import group_classification
 from services import group_eligibility
 from services import group_targets
 from services import group_join_worker
+from services import destination_lock
 from services.group_screening import (
     FRESHNESS_DAYS, MIN_CHECK_INTERVAL_SECONDS, RECHECK_COOLDOWN_SECONDS,
     build_evidence, classify, evidence_summary,
@@ -772,6 +773,8 @@ def init_db():
             conn.execute("ALTER TABLE accounts ADD COLUMN fb_avatar TEXT NOT NULL DEFAULT ''")
         if "fb_uid_enc" not in columns:
             conn.execute("ALTER TABLE accounts ADD COLUMN fb_uid_enc TEXT NOT NULL DEFAULT ''")
+        if "updated_at" not in columns:
+            conn.execute("ALTER TABLE accounts ADD COLUMN updated_at TEXT")
         # Jobs abandoned by a crashed worker must never be blindly reposted.
         conn.execute("UPDATE jobs SET state='needs_review', details='Worker interrupted; verify manually before retrying', updated_at=? WHERE state='running'", (iso(),))
     migrate_v6_ownership()
@@ -786,6 +789,7 @@ def init_db():
     migrate_v15_group_classification()
     migrate_v16_pending_approval_limit()
     migrate_v17_campaign_idempotency()
+    migrate_v18_destination_lock()
 
 
 def migrate_v17_campaign_idempotency():
@@ -800,6 +804,16 @@ def migrate_v17_campaign_idempotency():
             conn.execute("ALTER TABLE jobs ADD COLUMN idempotency_key TEXT")
             conn.execute("""CREATE INDEX IF NOT EXISTS idx_jobs_idempotency
                             ON jobs(pipeline_id, idempotency_key)""")
+
+
+def migrate_v18_destination_lock():
+    """V18: tạo bảng destination_locks nếu chưa tồn tại.
+
+    DestinationLockService được dùng bởi ctv_allocator và job_allocator để gắn
+    footer contact vào caption. Bảng mới nên không có dữ liệu nào bị mất.
+    """
+    with db() as conn:
+        destination_lock.ensure_schema(conn)
 
 
 def migrate_v16_pending_approval_limit():
@@ -1739,6 +1753,7 @@ class EnabledUpdate(BaseModel):
     account_id: int | None = None
     posting_mode: str | None = None
     nickname: str | None = None
+    description: str | None = None
 
 
 class JobReview(BaseModel):
@@ -1856,7 +1871,7 @@ class CTVLogin(BaseModel):
 
 
 class PasswordChange(BaseModel):
-    current_password: str = Field(min_length=1, max_length=256)
+    current_password: str | None = Field(default=None, max_length=256)
     new_password: str = Field(min_length=12, max_length=256)
 
 
@@ -2435,13 +2450,16 @@ def auth_me(principal: Principal = Depends(require_auth)):
 
 @app.post("/api/auth/change-password")
 def change_password(data: PasswordChange, principal: Principal = Depends(require_auth)):
-    """Rotate the caller's own password. The old password must be supplied."""
+    """Rotate the caller's own password. The old password must be supplied unless
+    this is a forced first-time change (must_change_password is set)."""
     if weak_password(data.new_password):
         raise HTTPException(422, "Mật khẩu mới quá yếu hoặc quá dễ đoán; cần tối thiểu 12 ký tự đa dạng")
     with db() as conn:
-        row = conn.execute("SELECT password_hash FROM users WHERE id=?", (principal.user_id,)).fetchone()
-        if not verify_secret(row["password_hash"], data.current_password):
-            raise HTTPException(401, "Mật khẩu hiện tại không đúng")
+        row = conn.execute("SELECT password_hash, must_change_password FROM users WHERE id=?", (principal.user_id,)).fetchone()
+        is_forced_change = bool(row["must_change_password"])
+        if not is_forced_change:
+            if not data.current_password or not verify_secret(row["password_hash"], data.current_password):
+                raise HTTPException(401, "Mật khẩu hiện tại không đúng")
         conn.execute("""UPDATE users SET password_hash=?, must_change_password=0, updated_at=? WHERE id=?""",
                      (hash_secret(data.new_password), iso(), principal.user_id))
         revoke_user_sessions(conn, principal.user_id)
@@ -2521,11 +2539,23 @@ def create_pipeline(data: PipelineCreate, _: Principal = Depends(require_admin))
 
 
 @app.patch("/api/pipelines/{pipeline_id}")
-def patch_pipeline(pipeline_id: int, data: EnabledUpdate, _: Principal = Depends(require_admin)):
+def patch_pipeline(pipeline_id: int, data: EnabledUpdate, principal: Principal = Depends(require_admin)):
     with db() as conn:
         entry(conn, "pipelines", pipeline_id)
-        conn.execute("UPDATE pipelines SET enabled=? WHERE id=?", (int(data.enabled), pipeline_id))
-    return {"ok": True}
+        updates = []
+        params = []
+        if data.enabled is not None:
+            updates.append("enabled=?")
+            params.append(int(data.enabled))
+        if data.description is not None:
+            updates.append("description=?")
+            params.append(data.description)
+        if updates:
+            updates.append("updated_at=?")
+            params.append(iso())
+            params.append(pipeline_id)
+            conn.execute(f"UPDATE pipelines SET {', '.join(updates)} WHERE id=?", params)
+    return {"ok": True, "description_saved": data.description is not None}
 
 
 def read_uid(token: str) -> str:
@@ -3024,7 +3054,8 @@ def create_verification_post(conn, pipeline_id: int, account_id: int, group_id: 
     caption_result = build_caption(draft.get("media_description", ""),
                                    list(draft.get("tags") or []),
                                    settings.get("topic") or "sản phẩm",
-                                   load_ai_config())
+                                   load_ai_config(),
+                                   posting_mode=mode)
     body = caption_result.get("caption") or draft["body"]
     if caption_result.get("status") == "blocked":
         raise HTTPException(409, "Nội dung bị chặn bởi bộ kiểm tra an toàn")

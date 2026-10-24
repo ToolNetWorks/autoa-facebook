@@ -130,7 +130,7 @@ async def dismiss_anonymous_notice(page: Page) -> bool:
             title = dialog.get_by_text(ANONYMOUS_NOTICE_RE)
             if not await title.count() or not await title.first.is_visible():
                 continue
-            ok = await page.get_by_role("button", name=ANONYMOUS_NOTICE_OK_RE).first
+            ok = page.get_by_role("button", name=ANONYMOUS_NOTICE_OK_RE).first
             if await ok.count() and await ok.is_visible():
                 if await _click(ok, timeout=5000):
                     await page.wait_for_timeout(800)
@@ -184,14 +184,14 @@ async def require_anonymous_mode(page: Page) -> bool:
         except Exception:
             pass
     else:
-        control = await page.get_by_role("button", name=ANONYMOUS_RE).first
-        if not (await control.count() and await control.is_visible()):
-            return False
-        if not await _click(control, timeout=5000):
-            return False
+            control = page.get_by_role("button", name=ANONYMOUS_RE).first
+            if not (await control.count() and await control.is_visible()):
+                return False
+            if not await _click(control, timeout=5000):
+                return False
     await page.wait_for_timeout(600)
     await dismiss_anonymous_notice(page)
-    okay = await page.get_by_role("button", name=ANONYMOUS_NOTICE_OK_RE).first
+    okay = page.get_by_role("button", name=ANONYMOUS_NOTICE_OK_RE).first
     if await okay.count() and await okay.is_visible():
         await _click(okay, timeout=5000)
     await page.wait_for_timeout(800)
@@ -204,14 +204,14 @@ async def open_identity_menu(page: Page) -> Any | None:
     dialog = page.get_by_role("dialog").last
     control = None
     try:
-        control = await dialog.get_by_role("button", name=IDENTITY_CONTROL_RE).first
+        control = dialog.get_by_role("button", name=IDENTITY_CONTROL_RE).first
         if not (await control.count() and await control.is_visible()):
             control = None
     except Exception:
         control = None
     if control is None:
         try:
-            control = await page.get_by_role("button", name=IDENTITY_CONTROL_RE).first
+            control = page.get_by_role("button", name=IDENTITY_CONTROL_RE).first
             if not (await control.count() and await control.is_visible()):
                 control = None
         except Exception:
