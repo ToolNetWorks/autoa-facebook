@@ -1860,6 +1860,24 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     return JSONResponse(status_code=422, content={"detail": detail, "fields": unique})
 
 
+@app.exception_handler(ProviderError)
+async def provider_error_handler(request: Request, exc: ProviderError):
+    LOG.warning("Lỗi dịch vụ AI tại %s: %s", request.url.path, str(exc))
+    return JSONResponse(status_code=503, content={"detail": "Dịch vụ xử lý đang gặp sự cố, vui lòng thử lại sau."})
+
+
+@app.exception_handler(ProviderError)
+async def provider_error_handler(request: Request, exc: ProviderError):
+    LOG.warning("Lỗi dịch vụ AI tại %s: %s", request.url.path, str(exc))
+    return JSONResponse(status_code=503, content={"detail": "Dịch vụ xử lý đang gặp sự cố, vui lòng thử lại sau."})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    LOG.exception("Lỗi không xử lý được tại %s: %s", request.url.path, str(exc))
+    return JSONResponse(status_code=500, content={"detail": "Máy chủ gặp sự cố, vui lòng thử lại."})
+
+
 @app.get("/")
 def home():
     return FileResponse(ROOT / "static" / "index.html")
