@@ -2229,22 +2229,18 @@ def settings_to_schema(row, pipeline_id: int) -> CaptionSettings:
 
 
 def record_payload(row) -> dict:
+    """The API shape of one AI caption record. Internal model/provider fields
+    are stripped so end users never see raw AI metadata."""
     return {
         "id": row["id"],
         "pipeline_id": row["pipeline_id"],
         "original_caption": row["original_caption"],
         "optimized_caption": row["optimized_caption"],
         "ai_status": row["ai_status"],
-        "risk_level": row["risk_level"],
         "meaning_preserved": bool(row["meaning_preserved"]),
         "approved": bool(row["approved"]),
         "approved_at": row["approved_at"],
-        "ai_model": row["ai_model"],
-        "ai_provider": row["ai_provider"],
-        "ai_engine": row["ai_engine"],
         "target": row["target"],
-        "topic": row["topic"],
-        "intent": row["intent"],
         "issues": json.loads(row["issues_json"] or "[]"),
         "changes": json.loads(row["changes_json"] or "[]"),
         "reason": row["reason"],
@@ -2334,13 +2330,12 @@ def optimize_caption_endpoint(pipeline_id: int, data: CaptionOptimizeRequest,
         record_id = cursor.lastrowid
     audit("caption.optimize", record_id, f"AI caption {result.status} (rủi ro {result.risk_level})", pipeline_id)
     payload = {
-        "ok": True, "id": record_id, "status": result.status, "risk_level": result.risk_level,
+        "ok": True, "id": record_id, "status": result.status,
         "meaning_preserved": result.meaning_preserved, "approved": auto_approve,
         "original_caption": result.original_caption, "optimized_caption": result.optimized_caption,
         "issues": [issue.model_dump() for issue in result.issues],
         "changes": [change.model_dump() for change in result.changes],
-        "reason": result.reason, "ai_model": result.ai_model, "ai_engine": result.engine,
-        "topic": result.topic, "intent": result.intent, "key_facts": result.key_facts,
+        "reason": result.reason,
         "auto_approved": auto_approve,
         "note": "Kết quả AI không bảo đảm Facebook sẽ duyệt bài; trạng thái tài khoản và group cũng ảnh hưởng kiểm duyệt.",
     }
@@ -4170,7 +4165,17 @@ def auto_post_history(pipeline_id: int, limit: int = 50, principal: Principal = 
             FROM auto_post_jobs j LEFT JOIN groups g ON g.id=j.group_id
             LEFT JOIN media_assets m ON m.id=j.media_id
             WHERE j.pipeline_id=? ORDER BY j.id DESC LIMIT ?""", (pipeline_id, limit)).fetchall()
-    return {"ok": True, "jobs": [dict(row) for row in rows]}
+    jobs = []
+    for row in rows:
+        job = dict(row)
+        job.pop("pipeline_id", None)
+        job.pop("media_id", None)
+        job.pop("account_id", None)
+        job.pop("group_id", None)
+        job.pop("created_by_ctv_id", None)
+        job.pop("ctv_config_id", None)
+        jobs.append(job)
+    return {"ok": True, "jobs": jobs}
 
 
 def publish_auto_post_jobs() -> None:
@@ -4643,7 +4648,14 @@ def list_auto_comment_jobs(pipeline_id: int, limit: int = 50, status: str = "", 
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(query, params).fetchall()
-    return {"ok": True, "jobs": [dict(r) for r in rows]}
+    jobs = []
+    for row in rows:
+        job = dict(row)
+        job.pop("fingerprint_id", None)
+        job.pop("idempotency_key", None)
+        job.pop("fb_comment_id", None)
+        jobs.append(job)
+    return {"ok": True, "jobs": jobs}
 
 
 @app.post("/api/pipelines/{pipeline_id}/auto-comment/jobs/{job_id}/approve")
@@ -4704,7 +4716,15 @@ def auto_comment_history(pipeline_id: int, limit: int = 50, principal: Principal
                                LEFT JOIN accounts a ON a.id = h.account_id
                                WHERE h.pipeline_id = ? ORDER BY h.id DESC LIMIT ?""",
                             (pipeline_id, limit)).fetchall()
-    return {"ok": True, "history": [dict(r) for r in rows]}
+    history = []
+    for row in rows:
+        item = dict(row)
+        item.pop("account_id", None)
+        item.pop("job_id", None)
+        item.pop("fb_comment_id", None)
+        item.pop("pipeline_id", None)
+        history.append(item)
+    return {"ok": True, "history": history}
 
 
 @app.get("/api/pipelines/{pipeline_id}/auto-comment/stats")
