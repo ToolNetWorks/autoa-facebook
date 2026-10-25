@@ -7,6 +7,7 @@ import { Switch } from '@/components/ui/Choice';
 import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Skeleton } from '@/components/ui/Surfaces';
 import { Modal } from '@/components/ui/Modal';
 import { GroupStatusList } from '@/features/auto-posting/GroupStatusList';
+import { jobStateLabel, jobStateTone } from '@/lib/statusLabels';
 import type { CtvAutoPostConfig, CtvAutoPostJob, CtvAutoPostSettings } from '@/types/api';
 import type { FacebookAccount, GroupRow } from '@/types/api';
 
@@ -561,7 +562,7 @@ export function CtvAutoPostPanel({
                 <td>{job.account_label ?? '—'}</td>
                 <td>{job.group_label ?? '—'}</td>
                 <td>
-                  <Badge tone={job.status === 'published' ? 'ok' : 'neutral'}>{job.status}</Badge>
+                  <Badge tone={jobStateTone(job.status)}>{jobStateLabel(job.status)}</Badge>
                 </td>
                 <td>{job.scheduled_for ? job.scheduled_for.replace('T', ' ').slice(0, 16) : '—'}</td>
                 <td>{job.caption ? job.caption.slice(0, 60) : '—'}</td>

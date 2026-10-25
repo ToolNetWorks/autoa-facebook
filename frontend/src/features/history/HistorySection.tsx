@@ -1,6 +1,7 @@
 
 import { useMemo, useState } from 'react';
 import { Badge, Card, DataTable, EmptyState, Stat, Tabs } from '@/components/ui/Surfaces';
+import { jobStateLabel, jobStateTone } from '@/lib/statusLabels';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
 const FILTERS = [
@@ -84,18 +85,8 @@ export function HistorySection({ workspace }: { workspace: WorkspaceData }) {
                   </Badge>
                 </td>
                 <td>
-                  <Badge
-                    tone={
-                      job.state === 'posted'
-                        ? 'ok'
-                        : job.state === 'failed'
-                          ? 'bad'
-                          : job.state === 'needs_review'
-                            ? 'warn'
-                            : 'info'
-                    }
-                  >
-                    {job.state}
+                  <Badge tone={jobStateTone(job.state)}>
+                    {jobStateLabel(job.state)}
                   </Badge>
                 </td>
                 <td>{new Date(job.updated_at).toLocaleString('vi-VN')}</td>

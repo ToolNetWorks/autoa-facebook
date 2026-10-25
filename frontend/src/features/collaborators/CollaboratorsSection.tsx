@@ -325,7 +325,6 @@ function PermissionPicker({
               />
               <span className="check-text">
                 <b>{permission.label}</b>
-                <small className="mono">{permission.id}</small>
               </span>
             </label>
           );

@@ -525,7 +525,7 @@ export function SharedAutoPostPanel({
               <tr key={blocker.group_id}>
                 <td>{blocker.label}</td>
                 <td>
-                  <Badge tone="neutral">{blocker.screening_status}</Badge>
+                  <Badge tone="neutral">{blocker.screening_status === 'blocked' ? 'Chặn' : blocker.screening_status === 'allowed' ? 'Cho phép' : blocker.screening_status}</Badge>
                 </td>
                 <td>{blocker.reason}</td>
               </tr>

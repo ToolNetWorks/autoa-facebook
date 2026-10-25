@@ -10,14 +10,12 @@ import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 interface OptimizeResult {
   id: number;
   status: string;
-  risk_level: string;
   meaning_preserved: boolean;
   original_caption: string;
   optimized_caption: string;
   issues: { category: string; severity: string; message: string }[];
   changes: { kind: string; summary: string }[];
   reason: string;
-  model_version: string;
   note: string;
 }
 
@@ -130,14 +128,12 @@ export function AiCaptionSection({ workspace }: { workspace: WorkspaceData }) {
         <Card title="2. Caption đề xuất">
           <div className="stack">
             <div className="badge-row">
-              <Badge tone={result.status === 'APPROVED' ? 'ok' : result.status === 'BLOCKED' ? 'bad' : 'warn'}>
-                {STATUS_LABEL[result.status] ?? result.status}
+              <Badge tone={result.status === 'BLOCKED' ? 'bad' : result.status === 'APPROVED' ? 'ok' : 'warn'}>
+                {STATUS_LABEL[result.status] ?? 'Chưa xác định'}
               </Badge>
-              <Badge tone="neutral">Rủi ro: {result.risk_level}</Badge>
               <Badge tone={result.meaning_preserved ? 'ok' : 'warn'}>
                 {result.meaning_preserved ? 'Giữ nguyên ý nghĩa' : 'Cần xem lại nghĩa'}
               </Badge>
-              {result.model_version ? <Badge tone="neutral">{result.model_version}</Badge> : null}
             </div>
 
             <div className="form-grid">

@@ -77,13 +77,13 @@ export function ScheduleModal({ pipelineId, open, onClose, onChanged }: {
       if (scheduleResponse.status === 'fulfilled') {
         setSettings(scheduleResponse.value.schedule);
       } else {
-        push(`Không tải được cấu hình lịch: ${scheduleResponse.reason?.message ?? 'Lỗi không xác định'}`, 'error');
+        push('Không tải được cấu hình lịch', 'error');
       }
 
       if (previewResponse.status === 'fulfilled') {
         setPreview(previewResponse.value);
       } else {
-        push(`Không tải được bản xem trước: ${previewResponse.reason?.message ?? 'Lỗi không xác định'}`, 'error');
+        push('Không tải được bản xem trước', 'error');
       }
     } catch (failure) {
       push(failure instanceof Error ? failure.message : 'Không tải được lịch đăng', 'error');

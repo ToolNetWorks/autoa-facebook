@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from 'react';
 import { api } from '@/services/apiClient';
 import { useToast } from '@/app/ToastProvider';
@@ -9,12 +8,11 @@ import type { Precheck, PrecheckCategory, PrecheckIssue } from '@/types/api';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
 const CATEGORY_LABEL: Record<string, string> = {
-  technical: 'Chất lượng kỹ thuật',
+  technical: 'Chất lượng video',
   visual: 'Nội dung hình ảnh',
   ocr: 'Văn bản trong video',
-  audio: 'Âm thanh và lời thoại',
   caption: 'Caption và hashtag',
-  copyright: 'Bản quyền và trùng lặp',
+  copyright: 'Bản quyền',
 };
 
 const CATEGORY_TONE: Record<string, 'ok' | 'warn' | 'bad' | 'neutral'> = {
@@ -30,8 +28,8 @@ const CATEGORY_STATUS: Record<string, string> = {
   pass: 'Đạt',
   needs_review: 'Cần xem lại',
   blocked: 'Không đạt',
-  unknown: 'Chưa kiểm tra được',
-  check_failed: 'Lỗi kiểm tra',
+  unknown: 'Chưa kiểm tra',
+  check_failed: 'Lỗi',
   not_provided: 'Chưa cung cấp',
 };
 
@@ -45,10 +43,10 @@ const STATUS_TONE: Record<string, 'ok' | 'warn' | 'bad' | 'neutral'> = {
 };
 
 const STATUS_LABEL: Record<string, string> = {
-  PASS: 'Phù hợp',
+  PASS: 'Đạt',
   BLOCKED: 'Không đạt',
-  CHECK_FAILED: 'Lỗi kiểm tra',
-  NEEDS_REVIEW: 'Cần người duyệt',
+  CHECK_FAILED: 'Lỗi',
+  NEEDS_REVIEW: 'Cần xem lại',
   QUEUED: 'Đang chờ',
   RUNNING: 'Đang kiểm tra',
 };
@@ -65,33 +63,54 @@ function formatTimestamp(ts: number | null | undefined): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function UserFriendlyReason(category: string, reasons: string[]): string {
+  if (!reasons || reasons.length === 0) return '';
+  const text = reasons.join(' ');
+  const mapping: Record<string, string> = {
+    technical: text.includes('đen') || text.includes('đóng băng')
+      ? 'Video bị tối hoặc đóng khung; cần thêm ánh sáng hoặc nội dung rõ ràng.'
+      : 'Video không đạt yêu cầu kỹ thuật.',
+    visual: text.toLowerCase().includes('nhạy cảm')
+      ? 'Phát hiện nội dung nhạy cảm trong hình ảnh.'
+      : 'Nội dung hình ảnh cần xem lại.',
+    ocr: 'Văn bản trong video có thể chứa nội dung cần kiểm tra.',
+    caption: 'Caption chứa từ ngữ vi phạm.',
+    copyright: 'Nội dung video chưa được xác minh bản quyền.',
+  };
+  return mapping[category] || text.slice(0, 200);
+}
+
+function UserFriendlySuggestion(category: string, suggestions: string[]): string {
+  if (!suggestions || suggestions.length === 0) return '';
+  const text = suggestions.join(' ');
+  const mapping: Record<string, string> = {
+    technical: 'Thử quay lại với ánh sáng tốt hơn, góc rộng hơn, hoặc thời lượng dài hơn.',
+    visual: 'Chỉnh sửa nội dung hình ảnh trước khi đăng lại.',
+    ocr: 'Xóa hoặc chỉnh sửa văn bản trong video.',
+    caption: 'Điều chỉnh caption theo hướng dẫn an toàn.',
+    copyright: 'Cung cấp bằng chứng sở hữu nội dung hoặc dùng nội dung khác.',
+  };
+  return mapping[category] || text.slice(0, 200);
+}
+
 function IssueList({ issues }: { issues: PrecheckIssue[] }) {
   if (!issues || issues.length === 0) return null;
   return (
     <div className="stack">
       {issues.map((issue, index) => (
         <Alert
-          key={`${issue.policy_category}-${issue.timestamp ?? index}`}
+          key={index}
           tone={issue.action === 'block' ? 'bad' : issue.action === 'review' ? 'warn' : 'info'}
         >
           <div className="issue-row">
-            <div className="issue-main">
-              <strong>{issue.label || issue.policy_category}</strong>
-              <span className="badge-wrap">
-                <Badge tone={issue.action === 'block' ? 'bad' : issue.action === 'review' ? 'warn' : 'ok'}>
-                  {issue.action === 'block' ? 'Chặn' : issue.action === 'review' ? 'Xem lại' : 'Thông tin'}
-                </Badge>
-                <Badge tone="neutral">{issue.risk_level}</Badge>
-                {issue.timestamp != null ? <Badge tone="neutral">~{formatTimestamp(issue.timestamp)}</Badge> : null}
-              </span>
-            </div>
+            <strong>{issue.label || issue.policy_category}</strong>
+            {issue.timestamp != null ? <small className="muted"> ~{formatTimestamp(issue.timestamp)}</small> : null}
             {issue.reason ? <p className="issue-reason">{issue.reason}</p> : null}
             {issue.remediation ? (
               <p className="issue-remediation">
-                <strong>Nguyên nhận:</strong> {issue.remediation}
+                <strong>Gợi ý:</strong> {issue.remediation}
               </p>
             ) : null}
-            {issue.policy_ref ? <p className="issue-ref">{issue.policy_ref}</p> : null}
           </div>
         </Alert>
       ))}
@@ -100,9 +119,11 @@ function IssueList({ issues }: { issues: PrecheckIssue[] }) {
 }
 
 function CategoryTable({ categories }: { categories: Record<string, PrecheckCategory> }) {
+  const entries = Object.entries(categories ?? {}).filter(([, cat]) => cat && cat.checked);
+  if (entries.length === 0) return null;
   return (
-    <DataTable head={['Hạng mục', 'Kết quả', 'Chi tiết', 'Ghi chú']}>
-      {Object.entries(categories ?? {}).map(([key, category]) => (
+    <DataTable head={['Hạng mục', 'Kết quả', 'Chi tiết']}>
+      {entries.map(([key, category]) => (
         <tr key={key}>
           <td>{CATEGORY_LABEL[key] ?? key}</td>
           <td>
@@ -110,16 +131,50 @@ function CategoryTable({ categories }: { categories: Record<string, PrecheckCate
               {CATEGORY_STATUS[category.status] ?? category.status}
             </Badge>
           </td>
-          <td className="cell-sub" style={{ maxWidth: '320px' }}>
-            {(category.reasons ?? []).join(' · ')}
-          </td>
-          <td className="cell-sub" style={{ maxWidth: '420px' }}>
-            {(category.suggestions ?? []).join(' · ')}
+          <td className="cell-sub">
+            {category.reasons && category.reasons.length > 0
+              ? UserFriendlyReason(key, category.reasons)
+              : ''}
+            {category.suggestions && category.suggestions.length > 0
+              ? ` ${UserFriendlySuggestion(key, category.suggestions)}`
+              : ''}
           </td>
         </tr>
       ))}
     </DataTable>
   );
+}
+
+function summarizeProblems(categories: Record<string, PrecheckCategory>, issues: PrecheckIssue[]): {
+  hasProblems: boolean;
+  blocked: boolean;
+  messages: string[];
+} {
+  const messages: string[] = [];
+  let blocked = false;
+
+  for (const [key, cat] of Object.entries(categories ?? {})) {
+    if (cat.status === 'blocked') {
+      blocked = true;
+      messages.push(`Hạng mục "${CATEGORY_LABEL[key] ?? key}" không đạt`);
+    } else if (cat.status === 'needs_review') {
+      messages.push(`Hạng mục "${CATEGORY_LABEL[key] ?? key}" cần xem lại`);
+    } else if (cat.status === 'check_failed') {
+      blocked = true;
+      messages.push(`Hạng mục "${CATEGORY_LABEL[key] ?? key}" lỗi kiểm tra`);
+    }
+  }
+
+  for (const issue of issues) {
+    if (issue.action === 'block') {
+      blocked = true;
+      messages.push(issue.label || issue.policy_category);
+    } else if (issue.action === 'review') {
+      messages.push(issue.label || issue.policy_category);
+    }
+  }
+
+  return { hasProblems: messages.length > 0, blocked, messages };
 }
 
 export function VideoPrecheckSection({ workspace }: { workspace: WorkspaceData }) {
@@ -145,7 +200,6 @@ export function VideoPrecheckSection({ workspace }: { workspace: WorkspaceData }
 
   useEffect(() => {
     void loadHistory();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace.pipelineId]);
 
   async function runCheck() {
@@ -205,19 +259,21 @@ export function VideoPrecheckSection({ workspace }: { workspace: WorkspaceData }
   }
 
   const canPublish = check && check.status === 'PASS';
-  const needsApproval = check && check.status === 'NEEDS_REVIEW' && !check.approved;
+  const needsApproval = check && check.status === 'NEEDS_REVIEW';
   const isBlocked = check && (check.status === 'BLOCKED' || check.status === 'CHECK_FAILED');
+
+  const summary = check
+    ? summarizeProblems(check.categories, check.issues ?? [])
+    : { hasProblems: false, blocked: false, messages: [] };
 
   return (
     <div className="stack">
       <div className="section-title">
-        <div>
-          <h2>Video Pre-Check</h2>
-          <p className="hint">
-            Mọi Reel phải qua kiểm tra an toàn nội dung trước khi xuất bản. Kết quả là gợi ý của công cụ,
-            không phải quyết định của Facebook. Bản quyền luôn UNVERIFIED trừ khi bạn tải lên bằng chứng.
-          </p>
-        </div>
+        <h2>Video Pre-Check</h2>
+        <p className="hint">
+          Mọi Reel phải qua kiểm tra an toàn nội dung trước khi xuất bản. Kết quả là gợi ý,
+          không phải quyết định của Facebook. Bản quyền luôn chưa xác minh trừ khi bạn cung cấp bằng chứng.
+        </p>
       </div>
 
       <Card title="1. Video cần kiểm tra">
@@ -254,7 +310,7 @@ export function VideoPrecheckSection({ workspace }: { workspace: WorkspaceData }
             rows={4}
             value={caption}
             onChange={(event) => setCaption(event.target.value)}
-            hint="Caption cũng được kiểm tra, và phải khớp với caption dùng khi đăng."
+            hint="Caption sẽ được kiểm tra cùng video."
           />
           <Button variant="primary" loading={busy} onClick={() => void runCheck()}>
             Kiểm tra trước video
@@ -266,21 +322,13 @@ export function VideoPrecheckSection({ workspace }: { workspace: WorkspaceData }
       {check ? (
         <Card title="2. Kết quả kiểm tra">
           <div className="stack">
-            <div className="badge-row">
-              <Badge tone={statusTone(check.status)}>
-                {STATUS_LABEL[check.status] ?? check.status}
-              </Badge>
-              {check.vision_model ? <Badge tone="neutral">{check.vision_model}</Badge> : null}
-              {check.policy_version ? <Badge tone="neutral">Bản đề {check.policy_version}</Badge> : null}
-            </div>
+            <Badge tone={statusTone(check.status)}>
+              {STATUS_LABEL[check.status] ?? check.status}
+            </Badge>
 
             {check.status === 'CHECK_FAILED' ? (
               <Alert tone="bad">
-                <p>
-                  <strong>Kiểm tra thất bại:</strong> {check.error || 'Lỗi hệ thống.'}
-                  {check.vision_model ? ` (mô hình: ${check.vision_model})` : ''}
-                </p>
-                <p>Không thể xuất bản khi kiểm tra lỗi. Nhấn "Kiểm tra lại" để thử lại.</p>
+                <p><strong>Không thể hoàn tành kiểm tra.</strong> Nhấn "Kiểm tra lại" để thử lại.</p>
               </Alert>
             ) : null}
 
@@ -288,19 +336,21 @@ export function VideoPrecheckSection({ workspace }: { workspace: WorkspaceData }
 
             {check.copyright_status ? (
               <Alert tone={check.copyright_status === 'VERIFIED' ? 'info' : 'warn'}>
-                <strong>Bản quyền:</strong> {check.copyright_status === 'VERIFIED'
+                <strong>Bản quyền:</strong>{' '}
+                {check.copyright_status === 'VERIFIED'
                   ? 'Đã xác minh nguồn gốc nội dung.'
-                  : 'UNVERIFIED — bạn cần tự xác nhận quyền sử dụng.'}
+                  : 'Chưa xác minh — bạn cần tự xác nhận quyền sử dụng.'}
               </Alert>
             ) : null}
 
             <IssueList issues={check.issues ?? []} />
 
-            {check.warnings?.length ? (
-              <Alert tone="warn">
+            {summary.hasProblems ? (
+              <Alert tone={summary.blocked ? 'bad' : 'warn'}>
+                <strong>{summary.blocked ? 'Không đạt' : 'Cần xem lại'}:</strong>
                 <ul>
-                  {check.warnings.map((warning, index) => (
-                    <li key={index}>{warning}</li>
+                  {summary.messages.map((msg, index) => (
+                    <li key={index}>{msg}</li>
                   ))}
                 </ul>
               </Alert>
@@ -319,7 +369,7 @@ export function VideoPrecheckSection({ workspace }: { workspace: WorkspaceData }
             <div className="btn-row">
               {canPublish ? (
                 <Alert tone="info">
-                  <b>Đã sẵn sàng cho bài đăng</b> — video đạt mọi kiểm tra.
+                  <b>Đã sẵn sàng cho bài đăng</b> — video qua mọi kiểm tra.
                 </Alert>
               ) : isBlocked ? (
                 <Button onClick={() => void retry()} loading={busy}>
@@ -343,18 +393,15 @@ export function VideoPrecheckSection({ workspace }: { workspace: WorkspaceData }
         {history.length === 0 ? (
           <EmptyState title="Chưa có video nào được kiểm tra" />
         ) : (
-          <DataTable head={['Tệp', 'Trạng thái', 'Kiểm tra lúc', '']}>
+          <DataTable head={['Kết quả', 'Thời gian', '']}>
             {history.map((item) => (
               <tr key={item.id}>
-                <td className="truncate" style={{ maxWidth: '240px' }}>
-                  {item.media_id}
-                </td>
                 <td>
-                  <Badge tone={STATUS_TONE[item.status] ?? 'neutral'}>
+                  <Badge tone={statusTone(item.status)}>
                     {STATUS_LABEL[item.status] ?? item.status}
                   </Badge>
                 </td>
-                <td>{item.checked_at ? new Date(item.checked_at).toLocaleString('vi-VN') : '—'}</td>
+                <td>{item.created_at ? new Date(item.created_at).toLocaleString('vi-VN') : '—'}</td>
                 <td className="actions">
                   <Button size="sm" onClick={() => setCheck(item)}>
                     Xem

@@ -4,6 +4,7 @@ import { api } from '@/services/apiClient';
 import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Alert, Badge, Card, DataTable, EmptyState, Stat, Tabs } from '@/components/ui/Surfaces';
+import { jobStateLabel, jobStateTone } from '@/lib/statusLabels';
 import type { JobRow, Precheck } from '@/types/api';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
@@ -117,7 +118,7 @@ export function SafetySection({ workspace }: { workspace: WorkspaceData }) {
                   </Badge>
                 </td>
                 <td>
-                  <Badge tone={job.state === 'failed' ? 'bad' : 'warn'}>{job.state}</Badge>
+                  <Badge tone={jobStateTone(job.state)}>{jobStateLabel(job.state)}</Badge>
                   {job.details ? <div className="cell-sub">{job.details}</div> : null}
                 </td>
                 <td className="actions">
@@ -140,15 +141,15 @@ export function SafetySection({ workspace }: { workspace: WorkspaceData }) {
         </Card>
       )}
 
-      {prechecks.filter((item) => item.status !== 'PASS').length > 0 ? (
+          {prechecks.filter((item) => item.status !== 'PASS').length > 0 ? (
         <Card title="Video chưa đạt kiểm tra">
           <ul className="stack-sm">
             {prechecks
               .filter((item) => item.status !== 'PASS')
               .map((item) => (
                 <li className="row-between" key={item.id}>
-                  <span className="truncate">{item.media_id}</span>
-                  <Badge tone={item.status === 'BLOCKED' ? 'bad' : 'warn'}>{item.status}</Badge>
+                  <span className="truncate">Video #{item.id}</span>
+                  <Badge tone={item.status === 'BLOCKED' ? 'bad' : 'warn'}>{item.status === 'BLOCKED' ? 'Không đạt' : item.status === 'CHECK_FAILED' ? 'Lỗi' : 'Cần xem lại'}</Badge>
                 </li>
               ))}
           </ul>

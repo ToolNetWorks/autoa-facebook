@@ -137,7 +137,7 @@ export function GroupsSection({ workspace }: { workspace: WorkspaceData }) {
         `/api/pipelines/${workspace.pipelineId}/groups/${group.id}/check`,
       );
       push(
-        result.status === 'ok' ? 'Đã kiểm tra group' : `Kết quả kiểm tra: ${result.status}`,
+        result.status === 'ok' ? 'Đã kiểm tra group' : 'Kiểm tra group chưa thành công',
         result.status === 'ok' ? 'success' : 'warn',
       );
       workspace.reloadGroups();

@@ -321,7 +321,7 @@ export function CollaboratorReportPage() {
           <div>
             <h2>{collaborator.username}</h2>
           <p className="hint">
-            Workspace: {collaborator.pipeline_name ?? '—'} · Trạng thái: {collaborator.status}
+            Workspace: {collaborator.pipeline_name ?? '—'} · Trạng thái: {collaborator.status === 'suspended' ? 'Đã khóa' : 'Hoạt động'}
           </p>
         </div>
         <div className="btn-row">

@@ -1,6 +1,7 @@
 
 import { useMemo, useState } from 'react';
 import { Badge, Card, DataTable, EmptyState, Stat, Tabs } from '@/components/ui/Surfaces';
+import { jobStateLabel, jobStateTone } from '@/lib/statusLabels';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
 const FILTERS = [
@@ -81,17 +82,9 @@ export function ScheduleSection({ workspace }: { workspace: WorkspaceData }) {
                 <td>{job.account_name}</td>
                 <td>
                   <Badge
-                    tone={
-                      job.state === 'posted'
-                        ? 'ok'
-                        : job.state === 'failed'
-                          ? 'bad'
-                          : job.state === 'needs_review'
-                            ? 'warn'
-                            : 'info'
-                    }
+                    tone={jobStateTone(job.state)}
                   >
-                    {job.state}
+                    {jobStateLabel(job.state)}
                   </Badge>
                 </td>
                 <td>{new Date(job.scheduled_at).toLocaleString('vi-VN')}</td>

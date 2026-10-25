@@ -3338,7 +3338,11 @@ def remember_media(conn, pipeline_id: int, path: Path, sha256: str, signature: s
 
 
 def precheck_payload(row) -> dict:
-    """The API shape of one pre-check."""
+    """The API shape of one pre-check. Internal technical metadata is stripped
+    so that end users never see AWS provider names, region, model identifiers,
+    raw moderation labels, confidence percentages, or internal file paths.
+    Only user-facing status, reasons, and suggestions are returned.
+    """
     item = dict(row)
     for name in PRECHECK_CATEGORIES:
         try:
@@ -3359,9 +3363,41 @@ def precheck_payload(row) -> dict:
         item["issues"] = []
     item["categories"] = {name: item.get(name, {}) for name in PRECHECK_CATEGORIES}
     item["approved"] = item.get("approved_at") is not None
-    item["policy_version"] = item.get("policy_version", "")
+    # Sanitize: remove internal technical fields from user-facing API response.
+    # Full technical details remain stored in the database for administrators.
+    item.pop("vision_model", None)
+    item.pop("policy_version", None)
+    item.pop("model_version", None)
+    item.pop("video_sha256", None)
+    item.pop("video_signature", None)
+    item.pop("caption_checked", None)
+    item.pop("error", None)  # detailed errors kept in DB; mapped to user message below
+    item.pop("checked_scope", None)
+    # Map internal error to a user-facing message if check failed
+    if item.get("status") == "CHECK_FAILED":
+        item["error"] = "Không thể hoàn tất kiểm tra"
+    # Sanitize categories: remove raw provider labels/confidence from details
+    for cat_name in item.get("categories", {}):
+        cat = item["categories"][cat_name]
+        if isinstance(cat, dict):
+            cat.pop("details", None)
+            cat.pop("raw_labels", None)
+            cat.pop("model", None)
+            cat.pop("provider", None)
+            cat.pop("region", None)
+    # Sanitize issues: keep only user-facing fields
+    sanitized_issues = []
+    for issue in item.get("issues", []):
+        if isinstance(issue, dict):
+            sanitized_issues.append({
+                "policy_category": issue.get("policy_category", ""),
+                "label": issue.get("label", issue.get("policy_category", "")),
+                "action": issue.get("action", ""),
+                "reason": issue.get("reason", ""),
+                "remediation": issue.get("remediation", ""),
+            })
+    item["issues"] = sanitized_issues
     item["copyright_status"] = item.get("copyright_status", "")
-    item["checked_scope"] = item.get("checked_scope", "")
     return item
 
 

@@ -5,6 +5,7 @@ import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Field';
 import { Alert, Badge, Card, DataTable, EmptyState } from '@/components/ui/Surfaces';
+import { taskStatusLabel, taskStatusTone } from '@/lib/statusLabels';
 import type { ManualTask } from '@/types/api';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
@@ -147,7 +148,7 @@ export function CommentsSection({ workspace }: { workspace: WorkspaceData }) {
                 </td>
                 <td>{task.account_label}</td>
                 <td>
-                  <Badge tone={task.status === 'completed' ? 'ok' : 'warn'}>{task.status}</Badge>
+                  <Badge tone={taskStatusTone(task.status)}>{taskStatusLabel(task.status)}</Badge>
                 </td>
                 <td className="actions">
                   {task.status !== 'completed' ? (
