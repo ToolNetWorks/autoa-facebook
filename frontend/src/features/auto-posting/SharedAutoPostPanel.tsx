@@ -112,7 +112,7 @@ export function SharedAutoPostPanel({
       const [dashboardResponse, limitResponse, historyResponse] = await Promise.all([
         api.get<Dashboard>(`/api/pipelines/${pipelineId}/auto-post/dashboard`),
         api.get<{ limits: AccountLimit[] }>(`/api/pipelines/${pipelineId}/auto-post/limits`),
-        api.get<{ counts?: Record<string, number> }>(`/api/pipelines/${pipelineId}/auto-post/history`).catch(() => ({ counts: undefined })),
+        api.get<{ counts?: Record<string, number> }>(`/api/pipelines/${pipelineId}/auto-post/history`),
       ]);
       setDashboard(dashboardResponse);
       setLimits(limitResponse.limits);

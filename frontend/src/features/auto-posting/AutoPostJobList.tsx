@@ -1,93 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '@/services/apiClient';
-import { Badge, EmptyState, Skeleton } from '@/components/ui/Surfaces';
+import { Badge, EmptyState, ErrorState, Skeleton } from '@/components/ui/Surfaces';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 
-export interface AutoPostJobItem {
-  id: number;
-  status: string;
-  media_id?: number | null;
-  media_name?: string | null;
-  account_label?: string | null;
-  account_id?: number | null;
-  group_label?: string | null;
-  group_id?: number | null;
-  group_url?: string | null;
-  caption: string;
-  posting_mode?: string;
-  nickname?: string;
-  scheduled_for?: string | null;
-  created_at?: string;
-  updated_at?: string;
-  error?: string;
-  defer_reason?: string;
-  evidence?: string;
-  permalink?: string;
-  attempts?: number;
-}
-
-export function getPostLink(job?: AutoPostJobItem | null): string {
-  if (!job) return '';
-  if (job.permalink && job.permalink.trim()) {
-    return job.permalink.trim();
-  }
-  if (job.status === 'posted' || job.status === 'published') {
-    if (job.group_url && job.group_url.trim()) {
-      return job.group_url.trim();
-    }
-    if (job.group_id) {
-      return `https://www.facebook.com/groups/${job.group_id}`;
-    }
-  }
-  return '';
-}
-
-export type FilterCategory = 'all' | 'waiting' | 'processing' | 'needs_review' | 'posted' | 'failed';
-
-export function mapJobStatus(status: string): {
-  label: string;
-  tone: 'neutral' | 'ok' | 'warn' | 'bad' | 'info';
-  description: string;
-} {
-  switch (status) {
-    case 'pending':
-      return { label: 'Đang chờ', tone: 'neutral', description: 'Đã lưu lịch, chờ đến giờ thực thi' };
-    case 'approved':
-      return { label: 'Đã duyệt', tone: 'info', description: 'Đã phê duyệt, chờ xuất bản' };
-    case 'queued':
-      return { label: 'Đang xử lý (hàng đợi)', tone: 'warn', description: 'Đã đưa vào hàng đợi chuẩn bị đăng' };
-    case 'running':
-      return { label: 'Đang xử lý', tone: 'warn', description: 'Worker đang tương tác với Facebook' };
-    case 'needs_review':
-      return { label: 'Cần xem lại', tone: 'warn', description: 'Chưa thể xác nhận hoặc cần kiểm tra thủ công' };
-    case 'pending_approval':
-      return { label: 'Chờ duyệt', tone: 'warn', description: 'Bài đã gửi, đang chờ quản trị viên group duyệt' };
-    case 'submitted_unverified':
-      return { label: 'Chưa xác nhận', tone: 'warn', description: 'Facebook đã nhận thao tác nhưng chưa có bằng chứng hiển thị' };
-    case 'posted':
-    case 'published':
-      return { label: 'Đã đăng', tone: 'ok', description: 'Có bằng chứng bài viết đã đăng thành công trên Facebook' };
-    case 'failed':
-      return { label: 'Thất bại', tone: 'bad', description: 'Có lỗi xác định khi đăng' };
-    case 'blocked':
-      return { label: 'Bị chặn', tone: 'bad', description: 'Bị chặn bởi bộ lọc an toàn hoặc giới hạn' };
-    case 'cancelled':
-      return { label: 'Đã hủy', tone: 'neutral', description: 'Đã hủy trước khi thực thi' };
-    default:
-      return { label: status, tone: 'neutral', description: status };
-  }
-}
-
-export function matchesFilter(job: AutoPostJobItem, filter: FilterCategory): boolean {
-  if (filter === 'all') return true;
-  if (filter === 'waiting') return ['pending', 'approved'].includes(job.status);
-  if (filter === 'processing') return ['queued', 'running'].includes(job.status);
-  if (filter === 'needs_review') return ['needs_review', 'pending_approval', 'submitted_unverified'].includes(job.status);
-  if (filter === 'posted') return ['posted', 'published'].includes(job.status);
-  if (filter === 'failed') return ['failed', 'blocked', 'cancelled'].includes(job.status);
-  return true;
-}
+import { getPostLink, mapJobStatus, matchesFilter } from './jobPresentation';
+import type { AutoPostJobItem, FilterCategory } from './jobPresentation';
+export { getPostLink, mapJobStatus, matchesFilter } from './jobPresentation';
+export type { AutoPostJobItem, FilterCategory } from './jobPresentation';
 
 function formatDate(iso?: string | null): string {
   if (!iso) return '—';
@@ -124,28 +45,38 @@ export function AutoPostJobList({
     failed: 0,
   });
   const [activeFilter, setActiveFilter] = useState<FilterCategory>(initialFilter);
+  const [loadError, setLoadError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedJob, setSelectedJob] = useState<AutoPostJobItem | null>(null);
   const [page, setPage] = useState(1);
   const pageSize = 15;
+  const activeRequest = useRef<AbortController | null>(null);
 
   async function fetchJobs(isSilent = false) {
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
     if (!isSilent) setRefreshing(true);
     try {
       const resp = await api.get<{ jobs: AutoPostJobItem[]; counts: Record<string, number> }>(
-        `/api/pipelines/${pipelineId}/auto-post/history?limit=300`,
+        `/api/pipelines/${pipelineId}/auto-post/history?limit=300`, controller.signal,
       );
-      setJobs(resp.jobs || []);
+      if (controller.signal.aborted) return;
+      if (!Array.isArray(resp.jobs) || !resp.counts) throw new Error('Invalid history response');
+      setLoadError(false);
+      setJobs((resp.jobs || []).map(job => ({ ...job,
+        status: ['posted','published'].includes(job.status) && (!getPostLink(job) || getPostLink(job).includes('/pending_posts/')) ? 'submitted_unverified' : job.status,
+      })));
       if (resp.counts) {
         setCounts(resp.counts);
         onCountsUpdate?.(resp.counts);
       }
     } catch {
-      // Keep existing jobs on silent failure
+      if (controller.signal.aborted) return;
+      setLoadError(true);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (!controller.signal.aborted) { setLoading(false); setRefreshing(false); }
     }
   }
 
@@ -158,7 +89,10 @@ export function AutoPostJobList({
   // Initial load
   useEffect(() => {
     setLoading(true);
+    setJobs([]);
+    setLoadError(false);
     void fetchJobs(false);
+    return () => activeRequest.current?.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pipelineId]);
 
@@ -211,7 +145,7 @@ export function AutoPostJobList({
               }}
             >
               <span>{tab.label}</span>
-              <span className="filter-badge">{tab.count}</span>
+              <span className="filter-badge">{loading || loadError ? '—' : tab.count}</span>
             </button>
           ))}
         </div>
@@ -228,13 +162,14 @@ export function AutoPostJobList({
       </div>
 
       {/* Loading Skeleton */}
+      {loadError ? <ErrorState title="Chưa tải được lịch sử đăng bài" description="Vui lòng thử lại." action={<Button onClick={() => void fetchJobs()}>Thử lại</Button>} /> : null}
       {loading ? (
         <div className="stack" style={{ gap: '12px' }}>
           <Skeleton variant="block" />
           <Skeleton variant="block" />
           <Skeleton variant="block" />
         </div>
-      ) : paginatedJobs.length === 0 ? (
+      ) : loadError ? null : paginatedJobs.length === 0 ? (
         <EmptyState
           title={
             activeFilter === 'all'
@@ -294,6 +229,7 @@ export function AutoPostJobList({
                         <Badge tone={st.tone}>{st.label}</Badge>
                       </div>
 
+                      <p className="hint">Auto Job #{job.id} · {job.post_id ? `Post #${job.post_id}` : 'Chưa tạo Post'}</p>
                       {/* Shortened Caption */}
                       <p className="job-caption-clamp" style={{ margin: '0 0 6px 0' }}>
                         {job.caption || '—'}
@@ -416,6 +352,9 @@ export function AutoPostJobList({
             }
           >
             <div className="stack" style={{ gap: '16px' }}>
+              <p>Auto Job #{selectedJob.id} · {selectedJob.post_id ? (
+                <Link className="link" to={`/workspace/${pipelineId}/group-post?post_id=${selectedJob.post_id}`}>Post #{selectedJob.post_id}</Link>
+              ) : 'Chưa tạo Post'}</p>
               {/* Post link if available */}
               {(modalIsPosted || modalPostLink) && (
                 <div style={{ background: 'rgba(22, 163, 74, 0.08)', border: '1px solid rgba(22, 163, 74, 0.25)', padding: '12px', borderRadius: 'var(--r-md)' }}>

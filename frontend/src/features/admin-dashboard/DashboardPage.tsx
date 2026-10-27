@@ -81,13 +81,6 @@ function PipelineCard({
   );
 }
 
-const emptyKpis: AnalyticsKpis = {
-  total: 0, posts_published: 0, posts_waiting: 0, posts_refused: 0, posts_removed: 0,
-  submitted_unverified: 0, group_posts: 0, group_posts_posted: 0, reels: 0, reels_posted: 0,
-  engagement: null, reactions: null, comments: null, shares: null, views: null, reach: null,
-  measured_posts: 0, unmeasured_posts: 0, engagement_available: false, views_available: false,
-};
-
 export function DashboardPage() {
   const navigate = useNavigate();
   const { signOut, session, refresh } = useAuth();
@@ -155,7 +148,7 @@ export function DashboardPage() {
       title="Dashboard"
       actions={
         <>
-          <Button size="sm" onClick={() => state.reload()}>
+          <Button size="sm" onClick={() => { state.reload(); analytics.reload(); performance.reload(); }}>
             Làm mới
           </Button>
           <Button size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
@@ -198,7 +191,10 @@ export function DashboardPage() {
 
       {!state.loading && rows.length > 0 ? (
         <>
-          <KpiRow kpis={analytics.data?.kpis ?? emptyKpis} />
+          {analytics.loading ? <Skeleton variant="block" /> : analytics.error || !analytics.data ? (
+            <ErrorState title="Chưa tải được thống kê" description="Vui lòng thử lại." action={<Button onClick={analytics.reload}>Thử lại</Button>} />
+          ) : <KpiRow kpis={analytics.data.kpis} />}
+          {performance.error ? <ErrorState title="Chưa tải được số liệu từng Pipeline" description="Vui lòng thử lại." action={<Button onClick={performance.reload}>Thử lại</Button>} /> : null}
 
           <div className="stat-row">
             <Stat label="Pipeline" value={rows.length} />

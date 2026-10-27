@@ -257,7 +257,8 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
                 loading="lazy"
                 onError={(e) => {
                   const target = e.currentTarget;
-                  target.src = '/placeholder-image.png';
+                  target.onerror = null;
+                  target.src = '/placeholder-image.svg';
                 }}
               />
               <span className="meta">
