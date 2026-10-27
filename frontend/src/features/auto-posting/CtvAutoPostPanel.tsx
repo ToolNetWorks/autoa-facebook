@@ -4,11 +4,11 @@ import { useToast } from '@/app/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Field';
 import { Switch } from '@/components/ui/Choice';
-import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Skeleton } from '@/components/ui/Surfaces';
+import { Alert, Card, DataTable, EmptyState, ErrorState, Skeleton } from '@/components/ui/Surfaces';
 import { Modal } from '@/components/ui/Modal';
 import { GroupStatusList } from '@/features/auto-posting/GroupStatusList';
-import { jobStateLabel, jobStateTone } from '@/lib/statusLabels';
-import type { CtvAutoPostConfig, CtvAutoPostJob, CtvAutoPostSettings } from '@/types/api';
+import { AutoPostJobList } from '@/features/auto-posting/AutoPostJobList';
+import type { CtvAutoPostConfig, CtvAutoPostSettings } from '@/types/api';
 import type { FacebookAccount, GroupRow } from '@/types/api';
 
 const WEEKDAYS = [
@@ -65,7 +65,7 @@ export function CtvAutoPostPanel({
   const [preview, setPreview] = useState<PreviewPayload | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [jobs, setJobs] = useState<CtvAutoPostJob[]>([]);
+  const [mainTab, setMainTab] = useState<'config' | 'jobs'>('config');
 
   async function load() {
     setLoading(true);
@@ -77,10 +77,6 @@ export function CtvAutoPostPanel({
       );
       setConfig(response);
       setDraft(response.settings);
-      const jobResponse = await api.get<{ jobs: CtvAutoPostJob[] }>(
-        `/api/pipelines/${pipelineId}/auto-post/my-jobs`,
-      );
-      setJobs(jobResponse.jobs);
     } catch (failure) {
       if (failure instanceof ApiError && failure.status === 403) {
         setForbidden(true);
@@ -231,9 +227,34 @@ export function CtvAutoPostPanel({
         </Alert>
       ) : null}
 
-      <Card
-        title="Cấu hình của tôi"
-        description="Chỉ áp dụng cho tài khoản của bạn trong Workspace này."
+      <div className="tabs" role="tablist" style={{ marginBottom: 'var(--sp-2)' }}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mainTab === 'config'}
+          className={`tab ${mainTab === 'config' ? 'active' : ''}`}
+          onClick={() => setMainTab('config')}
+        >
+          Cấu hình tự động
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mainTab === 'jobs'}
+          className={`tab ${mainTab === 'jobs' ? 'active' : ''}`}
+          onClick={() => setMainTab('jobs')}
+        >
+          Danh sách bài đăng
+        </button>
+      </div>
+
+      {mainTab === 'jobs' ? (
+        <AutoPostJobList pipelineId={pipelineId} />
+      ) : (
+        <>
+          <Card
+            title="Cấu hình của tôi"
+            description="Chỉ áp dụng cho tài khoản của bạn trong Workspace này."
         actions={
           <>
             <Button size="sm" onClick={() => void openPreview()}>
@@ -549,28 +570,8 @@ export function CtvAutoPostPanel({
         selectedGroupIds={draft.selected_group_ids}
       />
 
-      <Card title="Bài của tôi" description="Những bài hệ thống đã xếp lịch cho bạn.">
-        {jobs.length === 0 ? (
-          <EmptyState
-            title="Chưa có bài nào"
-            description="Sau khi bật tự động đăng, các bài của bạn sẽ hiện ở đây."
-          />
-        ) : (
-          <DataTable head={['Facebook', 'Group', 'Trạng thái', 'Thời điểm đăng', 'Caption']}>
-            {jobs.map((job) => (
-              <tr key={job.id}>
-                <td>{job.account_label ?? '—'}</td>
-                <td>{job.group_label ?? '—'}</td>
-                <td>
-                  <Badge tone={jobStateTone(job.status)}>{jobStateLabel(job.status)}</Badge>
-                </td>
-                <td>{job.scheduled_for ? job.scheduled_for.replace('T', ' ').slice(0, 16) : '—'}</td>
-                <td>{job.caption ? job.caption.slice(0, 60) : '—'}</td>
-              </tr>
-            ))}
-          </DataTable>
-        )}
-      </Card>
+        </>
+      )}
 
       <Modal
         open={previewOpen}

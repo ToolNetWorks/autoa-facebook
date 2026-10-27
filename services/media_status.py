@@ -34,12 +34,12 @@ CHECK_FAILED = "check_failed"
 STATES = (UPLOADED, ANALYZING, READY, NEEDS_REVIEW, BLOCKED, CHECK_FAILED)
 
 LABEL = {
-    UPLOADED: "Đã tải lên, chờ kiểm tra",
+    UPLOADED: "Đợi kiểm tra",
     ANALYZING: "Đang kiểm tra",
-    READY: "Khả dụng",
+    READY: "Đạt",
     NEEDS_REVIEW: "Cần xem xét",
-    BLOCKED: "Bị chặn",
-    CHECK_FAILED: "Kiểm tra thất bại",
+    BLOCKED: "Không đạt",
+    CHECK_FAILED: "Lỗi",
 }
 
 TONE = {
@@ -48,7 +48,7 @@ TONE = {
     READY: "ok",
     NEEDS_REVIEW: "warn",
     BLOCKED: "bad",
-    CHECK_FAILED: "bad",
+    CHECK_FAILED: "warn",
 }
 
 #: The analysis states of the database.
@@ -83,6 +83,13 @@ ERROR_TEXT = {
     "FileNotFoundError": "Không tìm thấy tệp ảnh.",
     "OSError": "Không đọc được tệp ảnh.",
     "TimeoutError": "Dịch vụ phân tích ảnh quá thời gian chờ.",
+    "Lỗi nhà cung cấp dịch vụ": "Dịch vụ phân tích ảnh không phản hồi.",
+    "Dịch vụ phân tích ảnh quá thời gian chờ.": "Dịch vụ phân tích ảnh quá thời gian chờ.",
+    "Dịch vụ bị giới hạn tạm thời; vui lòng thử lại.": "Dịch vụ bị giới hạn tạm thời; vui lòng thử lại.",
+    "Dịch vụ kiểm tra an toàn chưa được bật": "Dịch vụ kiểm tra an toàn chưa được bật.",
+    "AccessDeniedError": "Dịch vụ kiểm tra an toàn chưa được cấu hình.",
+    "ThrottlingError": "Dịch vụ bị giới hạn tạm thời; vui lòng thử lại.",
+    "ProviderTimeoutError": "Dịch vụ phân tích ảnh quá thời gian chờ.",
 }
 
 
@@ -125,32 +132,26 @@ def _safety_of(row) -> dict:
 def reason_of(row) -> str:
     """Một câu ngắn giải thích trạng thái, dành cho CTV đọc."""
     state = state_of(row.get("analysis_status"), row.get("safety_status"))
-    safety = _safety_of(row)
-    note = str(safety.get("note") or "").strip()
-    category = str(safety.get("category") or "").strip()
-    error = str(safety.get("error") or "").strip()
     if state == CHECK_FAILED:
-        if error:
-            return ERROR_TEXT.get(error, "Không kiểm tra được ảnh. Bấm “Kiểm tra lại” để thử lại.")
-        return "Không kiểm tra được ảnh. Bấm “Kiểm tra lại” để thử lại."
+        return "Chưa kiểm tra được ảnh. Bấm “Kiểm tra lại” để thử lại."
     if state == BLOCKED:
+        safety = _safety_of(row)
+        category = str(safety.get("category") or []).strip()
+        note = str(safety.get("note") or "").strip()
         what = CATEGORY_TEXT.get(category)
         if note:
             return note
         if what:
-            return f"Ảnh chứa nội dung bị cấm: {what}."
-        return "Ảnh vi phạm quy tắc an toàn, không được dùng để đăng."
+            return f"Không đạt ({what})."
+        return "Không đạt (nội dung vi phạm)."
     if state == NEEDS_REVIEW:
-        if safety.get("duplicate_of"):
-            return "Ảnh này đã có trong Album."
-        what = CATEGORY_TEXT.get(category)
+        safety = _safety_of(row)
+        note = str(safety.get("note") or "").strip()
         if note:
             return note
-        if what:
-            return f"Ảnh có dấu hiệu cần xem xét: {what}."
-        return "Hệ thống không xác định được rủi ro cụ thể, cần bạn xem xét."
+        return "Hệ thống cần bạn xem xét."
     if state == READY:
-        return "Kiểm tra đạt, ảnh dùng được cho lịch đăng."
+        return "Ảnh đã qua kiểm tra an toàn."
     if state == ANALYZING:
         return "Hệ thống đang kiểm tra ảnh."
     return "Ảnh đã tải lên, hệ thống sẽ kiểm tra trong ít phút."

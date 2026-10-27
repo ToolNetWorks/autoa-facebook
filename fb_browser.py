@@ -21,8 +21,13 @@ from services.composer_detector import (find_composer, find_editor, find_media_b
                                         find_publish_button)
 from services.engagement_collector import counters_from_text
 from services.logging import (JsonlEventLogger, default_log_dir, new_run_id)
-from services.media_upload import upload_media
-from services.post_verifier import newest_permalink, wait_post_outcome
+from services.media_upload import upload_media, attachment_ready
+from services.facebook_selectors import active_composer_dialog as registry_composer_dialog
+from services.posting_preflight import same_group, session_problem
+from services import posting_mode as posting_identity
+from services.facebook_session import inspect_session
+from services.group_access import inspect_group_access
+from services.post_verifier import newest_permalink, wait_post_outcome, group_post_links, visible_notices
 from services.posting_mode import (enforce_posting_identity, require_anonymous_mode,
                                    require_nickname_identity)
 from services.retry_policy import (AmbiguousPublishStateError, RetryPolicy,
@@ -154,10 +159,10 @@ async def first_visible(page, locators, timeout=2500):
 
 
 def result(status: str, details: str, evidence: str = "", identity: str = "",
-           verification: str = "", permalink: str = ""):
+           verification: str = "", permalink: str = "", session_status: str = ""):
     return {"state": status, "details": details, "evidence": evidence,
             "identity": identity, "verification": verification,
-            "permalink": permalink}
+            "permalink": permalink, "session_status": session_status}
 
 
 LOGIN_TEXT = re.compile(r"^(Log into Facebook|Log In|Đăng nhập vào Facebook|Đăng nhập Facebook|Đăng nhập)$", re.I)
@@ -228,40 +233,11 @@ async def check_session(account_id: int) -> dict:
                 page = context.pages[0] if context.pages else await context.new_page()
                 await page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(3000)
-                url = page.url.lower()
-                if any(marker in url for marker in CHECKPOINT_URL):
-                    outcome.update(status="checkpoint",
-                                   details="Facebook yêu cầu xác minh bảo mật (checkpoint hoặc 2FA). "
-                                           "Hãy dùng 'Đăng nhập lại' và tự xử lý trên trình duyệt.")
+                observed = await inspect_session(page, context)
+                if observed["status"] != "connected":
+                    outcome.update(status=observed["status"], details=observed["details"])
                     return outcome
-                if any(marker in url for marker in ("/login", "/logout")):
-                    outcome.update(status="expired",
-                                   details="Hồ sơ trình duyệt chưa đăng nhập hoặc phiên đã hết hạn. "
-                                           "Hãy tải cookie JSON mới hoặc đăng nhập lại.")
-                    return outcome
-                try:
-                    login_form = page.get_by_text(LOGIN_TEXT).first
-                    if await login_form.count() and await login_form.is_visible():
-                        outcome.update(status="expired",
-                                       details="Facebook hiển thị màn hình đăng nhập; phiên không còn hiệu lực.")
-                        return outcome
-                except Exception:
-                    pass
-                uid = ""
-                try:
-                    for cookie in await context.cookies("https://www.facebook.com"):
-                        domain = str(cookie.get("domain", "")).lstrip(".").lower()
-                        value = str(cookie.get("value", ""))
-                        if cookie.get("name") == "c_user" and domain == "facebook.com" and value.isdigit():
-                            uid = value
-                            break
-                except Exception:
-                    pass
-                if not uid:
-                    outcome.update(status="expired",
-                                   details="Không tìm thấy cookie phiên (c_user) trong hồ sơ trình duyệt. "
-                                           "Hãy tải cookie JSON mới hoặc đăng nhập lại.")
-                    return outcome
+                uid = observed["uid"]
                 name, avatar = await facebook_identity(page, uid)
                 outcome.update(status="connected", uid=uid, name=name, avatar=avatar,
                                details="Phiên đăng nhập còn hiệu lực trên hồ sơ trình duyệt.")
@@ -591,32 +567,24 @@ async def check_group(data: dict) -> dict:
                 except Exception:
                     pass
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=65000)
+                    navigation = await page.goto(url, wait_until="domcontentloaded", timeout=65000)
                 except Exception:
                     outcome.update(status="error", accessible=None, is_member=None, can_post=None,
                                    details="Không mở được trang group; chưa biết tài khoản có bị "
                                            "hạn chế hay không.")
                     return outcome
                 await page.wait_for_timeout(4000)
-                if any(part in page.url for part in ("/login", "/checkpoint", "/two_step_verification",
-                                                    "/recover", "/recoveraccount")):
-                    outcome.update(status="error",
-                                   details="Facebook yêu cầu đăng nhập hoặc xác minh; không kiểm tra được group.")
+                access = await inspect_group_access(page, context, url, navigation)
+                outcome["access_diagnostics"] = access
+                outcome["logged_in"] = access["session_status"] == "connected"
+                outcome["accessible"] = access["accessible"]
+                outcome["is_member"] = access["is_member"]
+                if access["code"] != "ACCESSIBLE":
+                    outcome.update(status="no_access" if access["accessible"] is False else "needs_review",
+                                   details=access["details"])
                     return outcome
-                outcome["logged_in"] = True
-                if "/groups/" not in page.url:
-                    outcome.update(status="not_accessible", accessible=False, is_member=None,
-                                   can_post=None,
-                                   details="Facebook không mở trang group; chưa xác định được quyền "
-                                           "đăng trong group này.")
-                    return outcome
-                outcome["accessible"] = True
-                try:
-                    resolved = str(page.url or "")
-                    if "/groups/" in resolved:
-                        outcome["resolved_url"] = resolved
-                except Exception:
-                    pass
+                outcome["resolved_url"] = access["resolved_url"]
+                outcome["resolution_verified"] = True
                 try:
                     body = (await page.locator("body").inner_text(timeout=10000))[:8000]
                 except Exception:
@@ -675,7 +643,6 @@ async def check_group(data: dict) -> dict:
                     outcome.update(status="needs_review", is_member=None, can_post=None,
                                    details="Không thấy ô soạn bài; chưa xác minh được quyền đăng bài.")
                     return outcome
-                outcome["is_member"] = True
                 try:
                     await composer.click(timeout=10000)
                     await page.wait_for_timeout(1500)
@@ -879,36 +846,27 @@ async def fill_join_answers(page, questions: list[str], answers: dict) -> bool:
 
 
 async def active_composer_dialog(page):
-    """Hop thoai composer dang mo, tuc la hop thoai co o nhap noi dung.
-
-    Facebook nhiet ba hop thoai: hop thoi goc, hop thoi composer va cac hop
-    thoai thong bao long nhau. Nut cua composer nam o hop thoi dung, khong
-    phai hop thoi cuoi cung.
-    """
-    try:
-        dialogs = await page.get_by_role("dialog").all()
-    except Exception:
-        return page.get_by_role("dialog").last
-    for dialog in dialogs:
-        try:
-            if await dialog.locator('[contenteditable="true"]').count():
-                return dialog
-        except Exception:
-            continue
-    return page.get_by_role("dialog").last
+    return await registry_composer_dialog(page)
 
 
 async def attempt_post(data: dict):
-    account_id, job_id = int(data["account_id"]), int(data["job_id"])
+    try:
+        pipeline_id, account_id, job_id, group_id = (
+            int(data[key]) for key in ("pipeline_id", "account_id", "job_id", "group_id"))
+        if min(pipeline_id, account_id, job_id, group_id) <= 0:
+            raise ValueError("Invalid ownership context")
+    except (KeyError, ValueError, TypeError):
+        return result("needs_review", "Thiếu thông tin Workspace của bài viết; chưa gửi bài.")
     expected = str(data["group_url"])
     evidence_name = f"job-{job_id}.png"
     evidence_path = EVIDENCE_DIR / evidence_name
     was_clicked = False
+    outcome_task = None
     run_id = new_run_id()
-    logger = JsonlEventLogger(default_log_dir(DATA) / "posting.jsonl", run_id=run_id)
+    logger = JsonlEventLogger(default_log_dir(DATA) / f"pipeline-{pipeline_id}" / "posting.jsonl", run_id=run_id)
     context = None
     try:
-        logger.emit("post_started", job_id=job_id, account_id=account_id,
+        logger.emit("post_started", pipeline_id=pipeline_id, job_id=job_id, account_id=account_id,
                     group_url=expected, run_id=run_id)
         async with async_playwright() as playwright:
             context = await context_for(playwright, account_id)
@@ -927,37 +885,27 @@ async def attempt_post(data: dict):
 
             # Chỉ retry lỗi mạng tạm thời khi điều hướng; không bao giờ
             # retry sau khi đã nhấn nút Đăng (để tránh đăng trùng).
-            await run_with_bounded_retry(go_to_group, policy=RetryPolicy(),
+            navigation = await run_with_bounded_retry(go_to_group, policy=RetryPolicy(),
                                    stop_fn=lambda: False)
-            await page.wait_for_timeout(5000)
-            if any(part in page.url for part in ("/login", "/checkpoint", "/two_step_verification")):
-                logger.emit("post_failed", job_id=job_id, reason="login_or_checkpoint",
-                            run_id=run_id)
-                return result("failed", "Login or checkpoint required; open login browser and handle manually")
-            if "/groups/" not in page.url:
-                logger.emit("post_failed", job_id=job_id, reason="unexpected_destination",
-                            run_id=run_id)
-                return result("failed", "Unexpected destination; refusing to post")
-            body_text = (await page.locator("body").inner_text(timeout=10000))[:6500]
-            if any(s in body_text for s in ("Join Group", "Tham gia nhóm")) and not any(s in body_text for s in ("Write something", "Bạn viết gì", "Viết gì")):
-                logger.emit("post_failed", job_id=job_id, reason="not_member_or_no_composer",
-                            run_id=run_id)
-                return result("failed", "Not a member or group permissions prevent posting")
-
+            access = await inspect_group_access(page, context, expected, navigation)
+            diagnostic_path = EVIDENCE_DIR / f"job-{job_id}-access.json"
+            diagnostic_path.write_text(json.dumps({"pipeline_id": pipeline_id, "account_id": account_id,
+                                                  "group_id": group_id, **access}, ensure_ascii=False), encoding="utf-8")
+            diagnostic_path.chmod(0o600)
+            if access["code"] != "ACCESSIBLE":
+                await page.screenshot(path=str(evidence_path), timeout=10000,
+                                      mask=[page.locator('input[name="email"],input[name="pass"],input[type="password"]')])
+                return result("needs_review", access["details"], evidence_name,
+                              session_status=access["session_status"])
+            expected = access["resolved_url"]
             mode = str(data.get("posting_mode") or "anonymous").lower()
             nickname = str(data.get("nickname") or "").strip()
             if mode not in ("anonymous", "nickname"):
                 return result("needs_review", f"Unknown posting mode '{mode}'; no post submitted")
-            if not data.get("media"):
-                return result("failed", "Group posts must contain an image")
+            if len(data.get("media") or []) != 1 or not str(data.get("body") or "").strip():
+                return result("failed", "Bài viết cần đúng một ảnh và caption.")
             await dismiss_common_popups(page)
-            compose = await first_visible(page, [
-                page.get_by_text(re.compile(r"Write something|Viết gì đó|Bạn viết gì|Hãy viết gì đó", re.I)),
-                page.get_by_role("button", name=re.compile(r"Write something|Viết gì đó|Bạn viết gì", re.I)),
-                page.locator("div[role='button']:has-text('Bạn viết gì đi')"),
-                page.locator("div[role='button']:has-text('Bạn đang nghĩ gì')"),
-                page.locator("div[aria-label='Tạo bài viết']"),
-            ])
+            compose = await find_composer(page, timeout=7000, posting_mode=mode)
             if compose is None:
                 logger.emit("post_failed", job_id=job_id, reason="composer_not_found",
                             run_id=run_id)
@@ -966,7 +914,6 @@ async def attempt_post(data: dict):
                 logger.emit("post_failed", job_id=job_id, reason="composer_not_clickable",
                             run_id=run_id)
                 return result("failed", "Không mở được ô soạn bài; không đăng bài")
-            await page.wait_for_timeout(1500)
             actual_identity, verification, identity_error = await enforce_posting_identity(
                 page, data["pipeline_id"], data["account_id"], data["group_id"], mode, nickname)
             if identity_error:
@@ -975,48 +922,35 @@ async def attempt_post(data: dict):
                             run_id=run_id)
                 return result("needs_review", identity_error, evidence_name, "", verification)
             dialog = await active_composer_dialog(page)
-            editor = await first_visible(page, [
-                dialog.locator('[contenteditable="true"][role="textbox"]'),
-                dialog.locator('[contenteditable="true"]'),
-                page.locator('[contenteditable="true"][role="textbox"]'),
-            ])
+            editor = await find_editor(page, dialog)
             if editor is None:
                 logger.emit("post_failed", job_id=job_id, reason="editor_not_found",
                             run_id=run_id)
                 return result("failed", "Text editor unavailable; no post submitted")
-            await editor.fill(str(data["body"]), timeout=15000)
+            expected_caption = str(data["body"])
+            await editor.fill(expected_caption, timeout=15000)
 
             media = list(data.get("media") or [])
             if media:
                 # Fallback upload: thử nhiều chiến lược, không ép khi giao diện đổi.
                 uploaded = await upload_media(page, media,
-                                              dialog_selector="div[role='dialog']")
+                                              dialog=dialog)
                 if not uploaded:
                     logger.emit("post_failed", job_id=job_id, reason="media_upload_failed",
                                 run_id=run_id)
                     return result("failed", "Media upload control not found; no post submitted")
-                await page.wait_for_timeout(3000)
 
             # Require a visible publish button in the active post dialog.
-            submit = await first_visible(page, [
-                dialog.get_by_role("button", name=SUBMIT_BUTTON_RE),
-                dialog.get_by_text(SUBMIT_BUTTON_RE),
-                *[dialog.locator(selector) for selector in SUBMIT_BUTTON_SELECTORS],
-                page.get_by_role("button", name=SUBMIT_BUTTON_RE),
-                page.get_by_text(SUBMIT_BUTTON_RE),
-                *[page.locator(selector) for selector in SUBMIT_BUTTON_SELECTORS],
-            ], timeout=2500)
+            submit = await find_publish_button(page, dialog)
             if submit is None:
                 await page.screenshot(path=str(evidence_path), full_page=False, timeout=10000)
-                labels = await describe_composer(page)
                 logger.emit("post_failed", job_id=job_id, reason="submit_button_not_found",
                             run_id=run_id)
                 return result("failed",
-                              "Không tìm thấy nút đăng trong ô soạn bài; không đăng bài"
-                              + (f" (có: {labels})" if labels else ""),
+                              "Không tìm thấy nút đăng trong ô soạn bài; chưa gửi bài.",
                               evidence_name)
             if mode == "nickname":
-                if not await identity_shown(page, actual_identity):
+                if not await posting_identity.identity_shown(page, actual_identity):
                     logger.emit("post_needs_review", job_id=job_id,
                                 reason="nickname_not_verified", run_id=run_id)
                     return result("needs_review",
@@ -1026,7 +960,7 @@ async def attempt_post(data: dict):
                 # Hộp thoại giải thích có thể xuất hiện lại; đóng trước khi
                 # kiểm tra danh tính lần cuối.
                 await dismiss_anonymous_notice(page)
-                if not await anonymous_mode_verified(page):
+                if not await posting_identity.anonymous_mode_verified(page):
                     logger.emit("post_needs_review", job_id=job_id,
                                 reason="anonymous_not_verified", run_id=run_id)
                     return result("needs_review",
@@ -1050,6 +984,7 @@ async def attempt_post(data: dict):
                         locked_caption, was_modified, lock_msg = lock_service.apply_destination_lock(current_caption, pipeline_id)
                         if was_modified:
                             await editor.fill(locked_caption, timeout=10000)
+                            expected_caption = locked_caption
                             await page.wait_for_timeout(500)
                             # Re-validate
                             is_valid, validation_msg = lock_service.validate_caption_with_lock(locked_caption, pipeline_id)
@@ -1066,35 +1001,52 @@ async def attempt_post(data: dict):
                             return result("needs_review",
                                           f"Destination Lock bắt buộc nhưng không thể áp dụng: {validation_msg}",
                                           evidence_name, actual_identity, "not_verified")
-                    except Exception as e:
+                    except Exception:
                         logger.emit("post_needs_review", job_id=job_id,
                                     reason="destination_lock_error", run_id=run_id)
                         return result("needs_review",
-                                      f"Lỗi Destination Lock: {e}",
+                                      "Chưa thể kiểm tra nội dung bắt buộc; chưa gửi bài.",
                                       evidence_name, actual_identity, "not_verified")
 
             if not await submit.is_enabled():
                 logger.emit("post_failed", job_id=job_id, reason="submit_disabled",
                             run_id=run_id)
                 return result("failed", "Publish control disabled; no post submitted")
+            final_caption = await editor.inner_text(timeout=5000)
+            if (re.sub(r"\s+", " ", final_caption).strip() != re.sub(r"\s+", " ", expected_caption).strip()
+                    or not same_group(page.url, expected) or not await attachment_ready(dialog)):
+                return result("needs_review", "Nội dung, ảnh hoặc Group đã thay đổi; chưa gửi bài.")
+            observed_session = await inspect_session(page, context)
+            if observed_session["status"] != "connected":
+                return result("needs_review", observed_session["details"],
+                              session_status=observed_session["status"])
+            baseline_links = await group_post_links(page)
+            if data.get("dry_run"):
+                await page.screenshot(path=str(evidence_path), timeout=10000)
+                return result("needs_review", "Bản xem trước đã sẵn sàng; chưa gửi bài.", evidence_name,
+                              actual_identity, "draft_verified")
+            identity_valid = (await posting_identity.identity_shown(page, actual_identity)
+                              if mode == "nickname" else await posting_identity.anonymous_mode_verified(page))
+            if not identity_valid:
+                return result("needs_review", "Danh tính đăng đã thay đổi; chưa gửi bài.")
+            prior_notices = await visible_notices(page)
+            outcome_task = asyncio.create_task(wait_post_outcome(page, final_caption, prior_notices=prior_notices))
+            await asyncio.sleep(0)
             was_clicked = True
-            if not await click_element(submit, timeout=15000):
-                logger.emit("post_failed", job_id=job_id, reason="submit_click_failed",
-                            run_id=run_id)
-                return result("failed", "Không bấm được nút đăng; không đăng bài")
+            await submit.click(timeout=15000)  # one attempt, including dispatch timeout
             # Quan sát kết quả thật. Không có kết luận nào được rút ra từ
             # việc đã bấm nút. Không tự retry sau khi nhấn Đăng.
-            outcome = await wait_post_outcome(page, str(data.get("body") or ""))
-            permalink = outcome["permalink"] or await newest_permalink(
-                page, str(data.get("body") or ""))
+            outcome = await outcome_task
+            permalink = await newest_permalink(page, final_caption, expected_group=expected,
+                                               exclude=baseline_links)
             await page.screenshot(path=str(evidence_path), full_page=False, timeout=15000)
-            if outcome["state"] == "published":
+            if permalink and "/pending_posts/" not in permalink and outcome["state"] not in ("pending_approval", "rejected"):
                 logger.emit("post_posted", job_id=job_id, identity=actual_identity,
                             permalink=permalink, run_id=run_id)
                 return result("posted",
                               "Facebook đã xác nhận bài đã đăng",
                               evidence_name, actual_identity, "verified", permalink)
-            if outcome["state"] == "pending_approval":
+            if outcome["state"] != "rejected" and (outcome["state"] == "pending_approval" or "/pending_posts/" in permalink):
                 logger.emit("post_pending_approval", job_id=job_id, identity=actual_identity,
                             permalink=permalink, run_id=run_id)
                 return result("pending_approval",
@@ -1118,7 +1070,7 @@ async def attempt_post(data: dict):
         error_class = classify_error(error)
         logger.emit("post_exception", job_id=job_id, error_class=error_class,
                     error=type(error).__name__, run_id=run_id)
-        label = "needs_review" if error_class == "publish_ambiguous" else "needs_review"
+        label = "submitted_unverified" if was_clicked else "needs_review"
         if context:
             try:
                 pages = context.pages
@@ -1126,9 +1078,13 @@ async def attempt_post(data: dict):
                     await pages[0].screenshot(path=str(evidence_path), timeout=5000)
             except Exception:
                 pass
-        return result(label, f"Browser exception: {type(error).__name__}: {str(error)[:500]}",
+        return result(label, "Chưa xác minh được kết quả; không tự gửi lại." if was_clicked
+                      else "Chưa thể chuẩn bị bài viết. Vui lòng kiểm tra lại.",
                       evidence_name if evidence_path.is_file() else "")
     finally:
+        if outcome_task is not None:
+            outcome_task.cancel()
+            await asyncio.gather(outcome_task, return_exceptions=True)
         logger.close()
         if context:
             try:
@@ -1479,14 +1435,14 @@ async def _cli_check_identity(payload: dict) -> dict:
                 if any(part in page.url for part in ("/login", "/checkpoint", "/two_step_verification")):
                     outcome.update(status="checkpoint", details="Yêu cầu đăng nhập hoặc xác minh")
                     return outcome
-                composer = await find_composer(page, timeout=3000)
+                composer = await find_composer(page, timeout=3000, posting_mode=mode)
                 if composer is None:
                     outcome.update(status="no_composer", details="Không tìm thấy ô soạn bài")
                     return outcome
                 if await click_element(composer, timeout=10000):
                     await page.wait_for_timeout(1500)
                     if mode == "anonymous":
-                        available = await require_anonymous_mode(page)
+                        available = await posting_identity.require_anonymous_mode(page)
                         outcome["available"] = available
                         outcome["details"] = ("Chế độ ẩn danh có sẵn" if available
                                               else "Chế độ ẩn danh không khả dụng")
@@ -1494,8 +1450,8 @@ async def _cli_check_identity(payload: dict) -> dict:
                         if not nickname:
                             outcome.update(status="needs_nickname", details="Chưa cấu hình biệt danh")
                         else:
-                            selected, names, status = await require_nickname_identity(
-                                page, data["pipeline_id"], data["account_id"], data["group_id"], nickname)
+                            selected, names, status = await posting_identity.require_nickname_identity(
+                                page, payload["pipeline_id"], payload["account_id"], payload["group_id"], nickname)
                             outcome["available"] = bool(selected)
                             outcome["details"] = (f"Đã chọn '{selected}'" if selected
                                                   else f"Biệt danh không có sẵn ({', '.join(names[:3]) if names else 'không có'})")
@@ -1540,8 +1496,8 @@ def _cli_dry_run(payload: dict) -> dict:
             errors.append(f"Group URL không hợp lệ: {error}")
     if not body:
         errors.append("Thiếu caption (body)")
-    if not media:
-        errors.append("Phải có ít nhất một tệp ảnh")
+    if len(media) != 1:
+        errors.append("Phải có đúng một tệp ảnh")
     if mode not in ("anonymous", "nickname"):
         errors.append(f"Chế độ đăng không hợp lệ: {mode}")
     if mode == "nickname" and not nickname:
@@ -1550,6 +1506,8 @@ def _cli_dry_run(payload: dict) -> dict:
     return {
         "status": "ok" if not errors else "invalid",
         "dry_run": True,
+        "scope": "payload_validation_only",
+        "publish_attempted": False,
         "account_id": account_id,
         "group_url": group_url,
         "mode": mode,
@@ -1589,7 +1547,7 @@ def main():
         Path(sys.argv[3]).write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
         print(outcome.get("verification_status", "unavailable"))
         return
-    if len(sys.argv) != 4 or sys.argv[1] not in ("post", "reel"):
+    if len(sys.argv) != 4 or sys.argv[1] not in ("post", "reel", "check-composer", "check-identity", "dry-run"):
         print("Usage: fb_browser.py login <account_id> | check|check-group|check-composer|check-identity|dry-run|post|reel|engagement <request.json> <result.json>", file=sys.stderr)
         raise SystemExit(2)
     payload = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))

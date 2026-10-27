@@ -255,6 +255,10 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
                 src={`/api/pipelines/${workspace.pipelineId}/media/${item.id}/thumbnail`}
                 alt={item.original_name}
                 loading="lazy"
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  target.src = '/placeholder-image.png';
+                }}
               />
               <span className="meta">
                 <span className="cell-title truncate">{item.original_name}</span>
@@ -266,7 +270,9 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
                   {item.saved ? <Badge tone="info">Đã lưu</Badge> : null}
                   {item.locked ? <Badge tone="neutral">Đã khóa</Badge> : null}
                 </span>
-                {item.state === 'check_failed' || item.state === 'needs_review' ? (
+                {item.state === 'blocked' ? (
+                  <span className="cell-sub">Không đạt ({item.reason})</span>
+                ) : item.state === 'check_failed' ? (
                   <span className="cell-sub">{item.reason}</span>
                 ) : null}
               </span>
@@ -283,6 +289,16 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
         footer={
           <>
             <Button onClick={() => setDetail(null)}>Đóng</Button>
+            {detail && detail.state === 'check_failed' && detail.can_retry ? (
+              <Button
+                variant="primary"
+                size="sm"
+                loading={busy === detail.id}
+                onClick={() => void retryAnalysis(detail)}
+              >
+                Kiểm tra lại
+              </Button>
+            ) : null}
             {detail && can('media.delete') ? (
               <Button variant="danger" onClick={() => void removeMedia(detail)} loading={busy === detail.id}>
                 Xóa ảnh
@@ -297,16 +313,24 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
               src={`/api/pipelines/${workspace.pipelineId}/media/${detail.id}/file`}
               alt={detail.original_name}
               style={{ width: '100%', borderRadius: 'var(--r-md)', maxHeight: '46vh', objectFit: 'contain' }}
+              onError={(e) => {
+                const target = e.currentTarget;
+                target.src = '/placeholder-image.svg';
+              }}
             />
             <div className="badge-row">
               <Badge tone={detail.state_tone}>{detail.state_label}</Badge>
-              <Badge tone="neutral">Dùng {detail.usage_count} lần</Badge>
-              {detail.last_used_at ? (
-                <Badge tone="neutral">Dùng lần cuối {new Date(detail.last_used_at).toLocaleString('vi-VN')}</Badge>
-              ) : null}
+              {detail.saved ? <Badge tone="info">Đã lưu</Badge> : null}
+              {detail.locked ? <Badge tone="neutral">Đã khóa</Badge> : null}
             </div>
-            <p className="hint">{detail.reason}</p>
-            {detail.description ? <p className="hint">{detail.description}</p> : null}
+            <p className="hint">
+              {detail.state === 'blocked'
+                ? `Không đạt (${detail.reason})`
+                : detail.reason}
+            </p>
+            {detail.state === 'ready' && detail.description ? (
+              <p className="hint">{detail.description}</p>
+            ) : null}
             {detail.tags.length > 0 ? (
               <div className="tag-list">
                 {detail.tags.map((tag) => (
@@ -315,16 +339,6 @@ export function AlbumSection({ workspace }: { workspace: WorkspaceData }) {
                   </Badge>
                 ))}
               </div>
-            ) : null}
-            {detail.state === 'check_failed' ? (
-              <Button
-                variant="primary"
-                size="sm"
-                loading={busy === detail.id}
-                onClick={() => void retryAnalysis(detail)}
-              >
-                Kiểm tra lại
-              </Button>
             ) : null}
             {can('media.edit') ? (
               <div className="btn-row">

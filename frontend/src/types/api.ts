@@ -77,6 +77,7 @@ export interface FacebookAccount {
   auth_method: 'cookie_file' | 'browser';
   cookie_updated_at: string | null;
   session_status: string;
+  session_display_status?: string;
   session_checked_at: string | null;
   session_details: string;
   fb_name: string;

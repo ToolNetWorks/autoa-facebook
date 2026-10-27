@@ -7,7 +7,9 @@ import { Switch } from '@/components/ui/Choice';
 import { Alert, Badge, Card, DataTable, EmptyState, ErrorState, Skeleton, Stat } from '@/components/ui/Surfaces';
 import { ScheduleModal } from '@/features/auto-posting/ScheduleModal';
 import { GroupStatusList } from '@/features/auto-posting/GroupStatusList';
+import { AutoPostJobList, type FilterCategory } from '@/features/auto-posting/AutoPostJobList';
 import type { GroupRow } from '@/types/api';
+
 
 interface AccountLimit {
   account_id: number;
@@ -93,19 +95,31 @@ export function SharedAutoPostPanel({
   const [issues, setIssues] = useState<string[]>([]);
   const [advanced, setAdvanced] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [mainTab, setMainTab] = useState<'config' | 'jobs'>('config');
+  const [jobFilter, setJobFilter] = useState<FilterCategory>('all');
+  const [jobCounts, setJobCounts] = useState<Record<string, number>>({});
+
+  function openJobsTab(filter: FilterCategory = 'all') {
+    setJobFilter(filter);
+    setMainTab('jobs');
+  }
 
   async function load() {
     setLoading(true);
     setLoadError(null);
     setForbidden(false);
     try {
-      const [dashboardResponse, limitResponse] = await Promise.all([
+      const [dashboardResponse, limitResponse, historyResponse] = await Promise.all([
         api.get<Dashboard>(`/api/pipelines/${pipelineId}/auto-post/dashboard`),
         api.get<{ limits: AccountLimit[] }>(`/api/pipelines/${pipelineId}/auto-post/limits`),
+        api.get<{ counts?: Record<string, number> }>(`/api/pipelines/${pipelineId}/auto-post/history`).catch(() => ({ counts: undefined })),
       ]);
       setDashboard(dashboardResponse);
       setLimits(limitResponse.limits);
       setSettings(dashboardResponse.settings);
+      if (historyResponse.counts) {
+        setJobCounts(historyResponse.counts);
+      }
     } catch (failure) {
       if (failure instanceof ApiError && failure.status === 403) {
         setForbidden(true);
@@ -168,6 +182,7 @@ export function SharedAutoPostPanel({
       const created = result.created.length;
       if (created > 0) {
         push(`Đã xếp lịch ${created} bài theo hạn mức từng Facebook`, 'success');
+        openJobsTab('waiting');
       } else {
         const reasons = [
           ...(result.notes ?? []),
@@ -234,9 +249,22 @@ export function SharedAutoPostPanel({
         <Stat label="Facebook đang hoạt động" value={totals.accounts} />
         <Stat label="Đạt giới hạn hôm nay" value={totals.at_limit} muted={totals.at_limit === 0} />
         <Stat label="Group sẵn sàng đăng" value={totals.eligible_groups} muted={totals.eligible_groups === 0} />
-        <Stat label="Bài đã xác nhận đăng" value={totals.published_today} />
-        <Stat label="Bài đang chờ" value={totals.waiting} />
-        <Stat label="Bài bị chặn trùng" value={totals.blocked_duplicate} muted={totals.blocked_duplicate === 0} />
+        <Stat
+          label="Bài đã xác nhận đăng"
+          value={totals.published_today}
+          onClick={() => openJobsTab('posted')}
+        />
+        <Stat
+          label="Bài đang chờ"
+          value={totals.waiting}
+          onClick={() => openJobsTab('waiting')}
+        />
+        <Stat
+          label="Bài bị chặn trùng"
+          value={totals.blocked_duplicate}
+          muted={totals.blocked_duplicate === 0}
+          onClick={() => openJobsTab('failed')}
+        />
       </div>
 
       {issues.length > 0 ? (
@@ -256,20 +284,52 @@ export function SharedAutoPostPanel({
         </Alert>
       ) : null}
 
-      <Card
-        title="Cấu hình chung của Workspace"
-        description="Chính sách dùng chung: giới hạn mà CTV không được vượt quá và lịch đăng của quản trị."
-        actions={
-          <>
-            <Button size="sm" onClick={() => setScheduleOpen(true)}>
-              Lịch đăng
-            </Button>
-            <Button size="sm" variant="primary" loading={running} onClick={() => void runNow()}>
-              Xếp lịch ngay
-            </Button>
-          </>
-        }
-      >
+      <div className="tabs" role="tablist" style={{ marginTop: 'var(--sp-2)', marginBottom: 'var(--sp-2)' }}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mainTab === 'config'}
+          className={`tab ${mainTab === 'config' ? 'active' : ''}`}
+          onClick={() => setMainTab('config')}
+        >
+          Cấu hình tự động
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mainTab === 'jobs'}
+          className={`tab ${mainTab === 'jobs' ? 'active' : ''}`}
+          onClick={() => setMainTab('jobs')}
+        >
+          Danh sách bài đăng {jobCounts.all ?? totals.waiting ? `(${jobCounts.all ?? totals.waiting})` : ''}
+        </button>
+      </div>
+
+      {mainTab === 'jobs' ? (
+        <AutoPostJobList
+          pipelineId={pipelineId}
+          initialFilter={jobFilter}
+          onCountsUpdate={setJobCounts}
+        />
+      ) : (
+        <>
+          <Card
+            title="Cấu hình chung của Workspace"
+            description="Chính sách dùng chung: giới hạn mà CTV không được vượt quá và lịch đăng của quản trị."
+            actions={
+              <>
+                <Button size="sm" onClick={() => openJobsTab('waiting')}>
+                  Lịch đăng
+                </Button>
+                <Button size="sm" variant="default" onClick={() => setScheduleOpen(true)}>
+                  Cài đặt lịch
+                </Button>
+                <Button size="sm" variant="primary" loading={running} onClick={() => void runNow()}>
+                  Xếp lịch ngay
+                </Button>
+              </>
+            }
+          >
         <div className="stack">
           <Switch
             id="auto_enabled"
@@ -305,7 +365,12 @@ export function SharedAutoPostPanel({
                       })
                     }
                   />
-                  <span>{account.label}</span>
+                  <span>
+                    {account.label}{' '}
+                    <Badge tone={account.session_status === 'connected' ? 'ok' : account.session_status === 'expired' ? 'bad' : 'neutral'}>
+                      {account.session_status === 'connected' ? 'Đang hoạt động' : account.session_status === 'expired' ? 'Hết hạn phiên' : 'Chưa kiểm tra'}
+                    </Badge>
+                  </span>
                 </label>
               ))}
             </div>
@@ -450,8 +515,8 @@ export function SharedAutoPostPanel({
                 <tr key={limit.account_id}>
                   <td>{limit.label}</td>
                   <td>
-                    <Badge tone={limit.session_status === 'connected' ? 'ok' : 'neutral'}>
-                      {limit.session_status === 'connected' ? 'Đã đăng nhập' : 'Chưa kiểm tra'}
+                    <Badge tone={limit.session_status === 'connected' ? 'ok' : limit.session_status === 'expired' ? 'bad' : 'neutral'}>
+                      {limit.session_status === 'connected' ? 'Đang hoạt động' : limit.session_status === 'expired' ? 'Hết hạn phiên' : 'Chưa kiểm tra'}
                     </Badge>
                   </td>
                   <td>
@@ -511,28 +576,30 @@ export function SharedAutoPostPanel({
         )}
       </Card>
 
+          {dashboard.blockers.length > 0 ? (
+            <Card title="Group chưa đủ điều kiện" description="Lý do để mỗi group không được xếp lịch.">
+              <DataTable head={['Group', 'Trạng thái', 'Lý do']}>
+                {dashboard.blockers.map((blocker) => (
+                  <tr key={blocker.group_id}>
+                    <td>{blocker.label}</td>
+                    <td>
+                      <Badge tone="neutral">{blocker.screening_status === 'blocked' ? 'Chặn' : blocker.screening_status === 'allowed' ? 'Cho phép' : blocker.screening_status}</Badge>
+                    </td>
+                    <td>{blocker.reason}</td>
+                  </tr>
+                ))}
+              </DataTable>
+            </Card>
+          ) : null}
+        </>
+      )}
+
       <ScheduleModal
         pipelineId={pipelineId}
         open={scheduleOpen}
         onClose={() => setScheduleOpen(false)}
         onChanged={() => void load()}
       />
-
-      {dashboard.blockers.length > 0 ? (
-        <Card title="Group chưa đủ điều kiện" description="Lý do để mỗi group không được xếp lịch.">
-          <DataTable head={['Group', 'Trạng thái', 'Lý do']}>
-            {dashboard.blockers.map((blocker) => (
-              <tr key={blocker.group_id}>
-                <td>{blocker.label}</td>
-                <td>
-                  <Badge tone="neutral">{blocker.screening_status === 'blocked' ? 'Chặn' : blocker.screening_status === 'allowed' ? 'Cho phép' : blocker.screening_status}</Badge>
-                </td>
-                <td>{blocker.reason}</td>
-              </tr>
-            ))}
-          </DataTable>
-        </Card>
-      ) : null}
     </div>
   );
 }

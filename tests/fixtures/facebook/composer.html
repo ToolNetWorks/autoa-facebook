@@ -1,0 +1,33 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"></head><body>
+<h1>Offline Group</h1>
+<button aria-label="Tài khoản, trang cá nhân của bạn">Account</button>
+<button id="outside">Post</button>
+<button id="trigger" onclick="document.querySelector('[role=dialog]').hidden=false">Write something...</button>
+<div role="dialog" hidden>
+  <span id="author">Anonymous member</span>
+  <button role="switch" aria-label="Post anonymously" aria-checked="true">Anonymous</button>
+  <div role="textbox" contenteditable="true"></div>
+  <input type="file" accept="image/*" hidden>
+  <div id="attachments"></div>
+  <button id="submit">Post</button>
+</div>
+<main role="main"><div role="feed"></div></main>
+<div role="status" id="notice"></div>
+<script>
+window.submissions=0;
+document.querySelector('input').onchange = e => {
+ const img = document.createElement('img'); img.src=URL.createObjectURL(e.target.files[0]);
+ document.querySelector('#attachments').replaceChildren(img);
+};
+document.querySelector('#submit').onclick = () => {
+ window.submissions++;
+ const dialog=document.querySelector('[role=dialog]');
+ const caption=dialog.querySelector('[contenteditable]').innerText;
+ const article=document.createElement('article'); article.setAttribute('role','article');
+ const text=document.createElement('p'); text.textContent=caption; article.append(text);
+ article.append(dialog.querySelector('#attachments img').cloneNode());
+ const link=document.createElement('a'); link.href='/groups/allowed/posts/new-post/'; link.textContent='Just now'; article.append(link);
+ document.querySelector('[role=feed]').append(article);
+ document.querySelector('#notice').textContent='Your post is now published'; dialog.hidden=true;
+};
+</script></body></html>

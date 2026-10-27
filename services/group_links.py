@@ -7,10 +7,11 @@ canonical URL and one comparable key so the same group cannot be added twice.
 from __future__ import annotations
 
 import re
-from urllib.parse import unquote, urlparse, urlunparse
+import unicodedata
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
-FACEBOOK_HOSTS = ("facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com", "fb.watch")
-GROUP_PATH = re.compile(r"^/groups/([A-Za-z0-9._-]+)/?$")
+FACEBOOK_HOSTS = ("facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com")
+GROUP_PATH = re.compile(r"^/groups/([^/]+)/?$")
 SHARE_GROUP_PATH = re.compile(r"^/share/g/([A-Za-z0-9._-]+)/?$")
 
 # Parameters that only carry a campaign, never the identity of the group.
@@ -52,24 +53,29 @@ def normalize_group_url(raw: str) -> tuple[str, str]:
     if parsed.scheme != "https":
         raise InvalidGroupLink("Chỉ chấp nhận link HTTPS của facebook.com")
     host = (parsed.hostname or "").lower()
-    if host not in FACEBOOK_HOSTS:
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise InvalidGroupLink("Port của URL không hợp lệ.") from error
+    if host not in FACEBOOK_HOSTS or parsed.username or parsed.password or port not in (None, 443):
         raise InvalidGroupLink("Link không thuộc facebook.com")
 
     path = parsed.path or ""
-    matched = GROUP_PATH.match(path)
+    shared = SHARE_GROUP_PATH.fullmatch(path)
+    if shared:
+        # A share token is NOT a Group ID. Only a real Facebook redirect can
+        # resolve it; retaining the namespace also avoids ID/token collisions.
+        code = shared.group(1)
+        return f"https://www.facebook.com/share/g/{code}/", f"share:{code}"
+    matched = GROUP_PATH.fullmatch(path)
     if not matched:
-        # Facebook shares a group as /share/g/<id>; the identifier is the same.
-        shared = SHARE_GROUP_PATH.match(path)
-        if not shared:
-            raise InvalidGroupLink("Link phải trỏ tới một group: https://www.facebook.com/groups/GROUP_ID")
-        key = shared.group(1)
-    else:
-        key = matched.group(1)
-
-    # A group link is fully identified by its path. Every query parameter of a
-    # shared group link is a tracking artefact, so the canonical form has none.
-    canonical = urlunparse(("https", "www.facebook.com", f"/groups/{key}/", "", "", ""))
-    return canonical, key.lower()
+        raise InvalidGroupLink("Link phải trỏ tới Group hoặc link chia sẻ Group.")
+    key = unicodedata.normalize("NFC", unquote(matched.group(1)))
+    if (not key or len(key) > 100 or key in (".", "..")
+            or any(not (ch.isalnum() or ch in "._-&" or unicodedata.category(ch).startswith("M")) for ch in key)):
+        raise InvalidGroupLink("ID hoặc đường dẫn Group không hợp lệ.")
+    canonical = urlunparse(("https", "www.facebook.com", f"/groups/{quote(key, safe='._-&')}/", "", "", ""))
+    return canonical, key.casefold()
 
 
 SHARE_CODE_PATTERN = re.compile(r"/share/g/([A-Za-z0-9._-]+)")
@@ -78,16 +84,17 @@ SHARE_CODE_PATTERN = re.compile(r"/share/g/([A-Za-z0-9._-]+)")
 def group_alias_keys(raw: str) -> list[str]:
     """Other keys that address the same group.
 
-    Facebook shares a group as /share/g/<code> while the group itself lives
-    under /groups/<id>. A shared numeric link carries the share code inside its
-    share_url parameter, so both forms can be linked to the same group.
+    Preserve supplied share provenance for duplicate review, including legacy
+    token keys. These aliases never authorize a URL rewrite or prove identity;
+    a redirect observed on Facebook is required for that.
     """
     keys: list[str] = []
     text = unquote(unquote(raw or ""))
     for match in SHARE_CODE_PATTERN.finditer(text):
-        code = match.group(1).lower()
-        if code not in keys:
-            keys.append(code)
+        code = match.group(1)
+        for alias in (f"share:{code}", code.lower()):
+            if alias not in keys:
+                keys.append(alias)
     return keys
 
 
@@ -100,7 +107,7 @@ def group_display_name(url: str, fallback: str = "") -> str:
     """A readable label for a group link."""
     parsed = urlparse(url)
     matched = GROUP_PATH.match(parsed.path or "")
-    key = matched.group(1) if matched else ""
+    key = unquote(matched.group(1)) if matched else ""
     if not key:
         return fallback or "Group"
     if key.isdigit():

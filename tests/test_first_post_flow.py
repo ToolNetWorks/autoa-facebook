@@ -136,7 +136,12 @@ def test_nothing_is_posted_before_the_membership_is_confirmed(client):
     make_picture(client, pipeline)
     enable_auto_post(client, pipeline, [group])
     preview = client.post(f'/api/pipelines/{pipeline}/auto-post/preview').json()['preview']
-    assert preview['posts'] == []
+    # Cho phép xếp lịch bài đầu tiên, nhưng worker lúc thực thi sẽ từ chối đăng khi chưa là thành viên
+    assert len(preview['posts']) == 1
+    with m.db() as conn:
+        decision = group_eligibility.pair_decision(conn, pipeline, account, group, for_scheduling=False)
+        assert decision["eligible"] is False
+        assert decision["decision"] == group_eligibility.WAITING_MEMBERSHIP
 
 
 # --- 5. bài đầu thành công -> VERIFIED_POSTED -------------------------------

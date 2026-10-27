@@ -64,7 +64,7 @@ def test_a_shared_group_link_and_its_numeric_form_are_the_same_group(client):
     shared = add_group(client, pipeline, account,
                        url="https://www.facebook.com/share/g/19XXY4GjsM/?mibextid=wwXIfr")
     assert shared.status_code == 201, shared.text
-    assert shared.json()['url'] == 'https://www.facebook.com/groups/19XXY4GjsM/'
+    assert shared.json()['url'] == 'https://www.facebook.com/share/g/19XXY4GjsM/'
     numeric = add_group(client, pipeline, account, url=(
         "https://www.facebook.com/groups/2591242354484903/?ref=share&mibextid=wwXIfr"
         "&share_url=https%3A%2F%2Fwww.facebook.com%2Fshare%2Fg%2F19XXY4GjsM%2F"))

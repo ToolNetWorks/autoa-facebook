@@ -1,114 +1,56 @@
-"""Tải ảnh lên trình soạn thảo với nhiều chiến lược dự phòng.
-
-Facebook đôi khi đổi giao diện: một lúc nút ảnh mở hộp chọn tệp, một lúc
-lại là input ẩn. Module này thử theo thứ tự từ ổn định nhất đến dự phòng,
-không bao giờ ép upload khi không tìm thấy điều khiển.
-"""
+"""Attach exactly one image and wait for actual composer preview readiness."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Sequence
+from services.facebook_selectors import SelectorRegistry, active_composer_dialog
 
-from playwright.async_api import Page
+
+async def attachment_ready(dialog: Any) -> bool:
+    registry = SelectorRegistry()
+    previews = registry.locators(dialog, 'preview')[0]
+    count = 0
+    for image in await previews.all():
+        if await image.is_visible() and await image.evaluate('(img) => img.complete && img.naturalWidth > 0'):
+            count += 1
+    # Uploaded previews can become CDN URLs; a visible Remove photo control
+    # is also explicit evidence of an attachment, unlike a profile avatar.
+    removals = registry.locators(dialog, 'remove_photo')[0]
+    remove_count = sum([await item.is_visible() for item in await removals.all()])
+    progress = dialog.locator('[role="progressbar"], [aria-busy="true"]')
+    busy = any([await item.is_visible() for item in await progress.all()])
+    return max(count, remove_count) == 1 and not busy
 
 
-async def upload_media(page: Page, media_paths: Sequence[str | Path],
-                       dialog_selector: str = "div[role='dialog']") -> bool:
-    """Tải danh sách tệp ảnh vào trình soạn thảo đang mở.
-
-    Trả về True khi ít nhất một tệp đã được chọn thành công. Thử các chiến
-    lược sau theo thứ tự:
-
-    1. Nút ảnh trong dialog → ``expect_file_chooser`` → ``set_files``.
-    2. Input ẩn ``input[type='file']`` trong dialog → ``set_input_files``.
-    3. Nút ảnh trên trang chính → ``expect_file_chooser`` → ``set_files``.
-    4. Input ẩn trên trang chính → ``set_input_files``.
-
-    Không bao giờ giả tạo kết quả: nếu không tìm thấy điều khiển nào, trả về
-    False và gọi lệnh phải dừng thay vì đăng bài thiếu ảnh.
-    """
+async def upload_media(page: Any, media_paths: Sequence[str | Path],
+                       dialog_selector: str = "div[role='dialog']", *,
+                       dialog: Any = None, timeout: int = 15000) -> bool:
     paths = [str(p) for p in media_paths if p]
-    if not paths:
+    if len(paths) != 1 or not Path(paths[0]).is_file():
         return False
-
-    photo_labels = ("Ảnh/video", "Ảnh / Video", "Photo/video", "Photos/videos", "Ảnh")
-    upload_re = r"Đính kèm một ảnh hoặc video|Attach a photo or video|Chọn ảnh|Upload photos?|Chọn từ máy tính"
-
-    contexts = [page.locator(dialog_selector), page]
-
-    for ctx in contexts:
-        photo_button = None
-        for label in photo_labels:
-            try:
-                candidate = ctx.locator(f'[aria-label="{label}"]').first
-                if await candidate.count() and await candidate.is_visible():
-                    photo_button = candidate
-                    break
-            except Exception:
-                continue
-        if photo_button is None:
-            try:
-                candidate = ctx.get_by_role("button", name=__import__("re").compile(
-                    r"^(Photo|Photos)$", __import__("re").I)).first
-                if await candidate.count() and await candidate.is_visible():
-                    photo_button = candidate
-            except Exception:
-                pass
-
-        if photo_button is not None:
-            try:
-                async with page.expect_file_chooser(timeout=15000) as chooser_info:
-                    if await _click(photo_button, timeout=8000):
-                        chooser = await chooser_info.value
-                        await chooser.set_files(paths)
-                        return True
-            except Exception:
-                pass
-
-        upload = None
-        try:
-            candidate = ctx.get_by_role("button", name=__import__("re").compile(upload_re, __import__("re").I)).first
-            if await candidate.count() and await candidate.is_visible():
-                upload = candidate
-        except Exception:
-            pass
-        if upload is None:
-            try:
-                candidate = ctx.locator(f'[aria-label*="{upload_re}" i]').first
-                if await candidate.count() and await candidate.is_visible():
-                    upload = candidate
-            except Exception:
-                pass
-
-        if upload is not None:
-            try:
-                async with page.expect_file_chooser(timeout=15000) as chooser_info:
-                    if await _click(upload, timeout=8000):
-                        chooser = await chooser_info.value
-                        await chooser.set_files(paths)
-                        return True
-            except Exception:
-                pass
-
-        try:
-            hidden = ctx.locator("input[type='file']").first
-            if await hidden.count() and await hidden.is_visible():
-                await hidden.set_input_files(paths)
-                return True
-        except Exception:
-            pass
-
-    return False
-
-
-async def _click(element: Any, timeout: int = 10000) -> bool:
-    try:
-        await element.click(timeout=timeout)
-        return True
-    except Exception:
-        pass
-    try:
-        await element.click(timeout=timeout, force=True)
-        return True
-    except Exception:
+    dialog = dialog if dialog is not None else await active_composer_dialog(page)
+    if dialog is None:
         return False
+    if await attachment_ready(dialog):
+        return False  # refuse to add to an existing attachment
+    registry = SelectorRegistry()
+    file_input = await registry.resolve(dialog, 'file_input', visible=False, timeout=200)
+    if file_input is not None:
+        # Playwright supports hidden inputs; visibility is not required here.
+        await file_input.set_input_files(paths, timeout=timeout)
+    else:
+        button = await registry.resolve(dialog, 'media', timeout=1000)
+        if button is None:
+            return False
+        async with page.expect_file_chooser(timeout=timeout) as pending:
+            await button.click(timeout=5000)
+        chooser = await pending.value
+        await chooser.set_files(paths, timeout=timeout)
+    deadline = asyncio.get_running_loop().time() + timeout / 1000
+    while True:
+        if await attachment_ready(dialog):
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.1)

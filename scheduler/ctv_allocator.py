@@ -65,8 +65,6 @@ def _account_rows(conn, pipeline_id: int, settings: dict) -> list[dict]:
             continue
         if not item.get("enabled"):
             continue
-        if (item.get("session_status") or "") in ("expired", "error", "invalid", "revoked"):
-            continue
         result.append(item)
     return result
 
@@ -266,14 +264,23 @@ def plan_for_owner(conn, pipeline_id: int, settings: dict, moment: datetime | No
         if not time_windows.is_inside_window(scheduled_for, schedule):
             notes.append(f"{chosen_group.get('label')}: thời điểm đăng nằm ngoài khung giờ")
             continue
+        if not media:
+            notes.append("Album chưa có ảnh đủ điều kiện an toàn")
+            break
         candidates = [item for item in media if item["id"] not in used_media]
+        if not candidates:
+            candidates = list(media)
         candidates = _order_media(candidates, rules.get("image_selection_rule", ""),
                                   f"{pipeline_id}:{owner_id}:{day}")
         chosen = select_media(candidates, settings.get("topic", ""))
         picture = chosen.get("media")
+        if not picture and len(candidates) < len(media):
+            fallback = _order_media(list(media), rules.get("image_selection_rule", ""),
+                                    f"{pipeline_id}:{owner_id}:{day}")
+            picture = select_media(fallback, settings.get("topic", "")).get("media")
         if not picture:
-            notes.append("Album chưa có ảnh đủ điều kiện an toàn")
-            break
+            notes.append(f"{chosen_group.get('label')}: chưa có ảnh phù hợp")
+            continue
         caption_result = create_caption(picture.get("description") or "",
                                         list(picture.get("tags") or []),
                                         settings.get("topic", ""), provider_config,

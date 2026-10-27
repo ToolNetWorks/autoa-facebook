@@ -71,7 +71,7 @@ ELIGIBLE_STATUSES = (group_verification.VERIFIED_POSTED, group_verification.PEND
 #: Những trạng thái phiên Facebook không dùng được để đăng.
 #: Một phiên chưa được kiểm tra (unknown) chưa phải là phiên chết: lần kiểm tra
 #: group sẽ cho biết tài khoản còn dùng được hay không.
-DEAD_SESSIONS = ("expired", "error", "invalid", "revoked")
+DEAD_SESSIONS = ("expired", "checkpoint", "restricted", "error", "invalid", "revoked")
 
 MODE_ANONYMOUS = "anonymous"
 MODE_NICKNAME = "nickname"
@@ -117,6 +117,8 @@ def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
                     MODE_ANONYMOUS)
 
     mode, nickname = mode_of(conn, account_id, group_id, group)
+    if for_scheduling:
+        return _schedule_decision(group, mode)
 
     # 1. Group phải dùng được.
     if not group["enabled"]:
@@ -213,6 +215,35 @@ def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
             "action": _action_of(status, evidence), "mode": mode,
             "first_post_eligible": False, "recurring_eligible": True,
             "decision": decision}
+
+def _schedule_decision(group, mode: str) -> dict:
+    """Quyết định khi LƯU LỊCH (SCHEDULE_VALIDATION).
+
+    Chỉ dùng dữ liệu cấu hình của Workspace: group đang bật, đang hoạt động và
+    được đánh dấu là group đích. Không dùng phiên Facebook, thành viên group,
+    quyền đăng, biệt danh có sẵn hay kết quả kiểm tra (NOT_TESTED,
+    CHECK_FAILED...): những điều đó chỉ được kiểm tra lúc worker chuẩn bị đăng.
+    Tenant và cặp Facebook–Group đã được kiểm tra trước khi gọi hàm này.
+    """
+    group = dict(group)
+    if not group.get("enabled"):
+        return _no(group_verification.NOT_TESTED, "Group đang tạm dừng.",
+                   "Bật lại group trong cấu hình.", mode)
+    if group["status"] != "active":
+        return _no(group_verification.NOT_TESTED, "Group không hoạt động.",
+                   "Kiểm tra lại group.", mode)
+    if not group["approved_target"]:
+        return _no(group_verification.NOT_TESTED, "Group chưa được chọn làm group đích.",
+                   "Đánh dấu group là đích được phép đăng.", mode)
+    screening = (group.get("screening_status") or "").lower()
+    if screening in (group_verification.RESTRICTED_CONFIRMED, "restricted", "rejected"):
+        return _no(group_verification.RESTRICTED_CONFIRMED, "Facebook hạn chế quyền đăng trong group này.",
+                   "Dùng tài khoản khác hoặc kiểm tra lại quyền của tài khoản trong group.", mode)
+    return {"eligible": True, "status": group_verification.NOT_TESTED,
+            "reason": "Có thể xếp lịch. Điều kiện đăng được kiểm tra lúc đến giờ đăng.",
+            "action": "", "mode": mode, "first_post_eligible": True,
+            "recurring_eligible": False, "decision": FIRST_POST_READY}
+
 
 def _no(status: str, reason: str, action: str, mode: str, decision: str = NEEDS_ACTION) -> dict:
     return {"eligible": False, "status": status, "reason": reason, "action": action,
