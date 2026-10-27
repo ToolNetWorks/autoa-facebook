@@ -132,3 +132,17 @@ def test_concurrent_promotion_creates_only_one_persistent_post(client, monkeypat
         assert auto['status'] == 'queued', auto['error']
         assert conn.execute("SELECT COUNT(*) FROM jobs WHERE state='queued' AND pipeline_id=?", (pipeline,)).fetchone()[0] == 1
         assert auto['post_id'] is not None
+
+
+def test_history_counters_do_not_confirm_unproven_posted(client):
+    job_id,pipeline,account,group=due_job(client)
+    with m.db() as conn:
+        post=conn.execute('SELECT post_id FROM jobs WHERE id=?',(job_id,)).fetchone()[0]
+        conn.execute('''INSERT INTO auto_post_jobs(pipeline_id,account_id,group_id,post_id,caption,status,idempotency_key,created_at,updated_at)
+            VALUES(?,?,?,?,'Historical claim','posted','history-claim',?,?)''',(pipeline,account,group,post,m.iso(),m.iso()))
+    data=client.get(f'/api/pipelines/{pipeline}/auto-post/history').json()
+    assert data['counts']['posted']==0
+    assert data['counts']['needs_review']==1
+    assert data['jobs'][0]['status']=='submitted_unverified'
+    assert data['jobs'][0]['post_id']==post
+    assert client.post(f'/api/jobs/{job_id}/review',json={'state':'posted'}).status_code==409

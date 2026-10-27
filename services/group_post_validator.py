@@ -134,7 +134,7 @@ def validate_selection(conn, pipeline_id: int, group_ids: list[int], principal,
             deferred.append({"group_id": group_id, "label": group["label"],
                              "reason": f"Tài khoản đã đủ {daily_limit} bài/ngày, bài sẽ chờ ngày sau"})
         decision = group_eligibility.pair_decision(conn, pipeline_id, account_id,
-                                                   group_id, group)
+                                                   group_id, group, for_scheduling=True)
         if not decision["eligible"]:
             skipped.append({"group_id": group_id, "label": group["label"],
                             "reason": decision["reason"] or "Group chưa đủ điều kiện đăng"})

@@ -26,14 +26,16 @@ CTV_PASSWORD = "ctv-password-2026-strong"
 
 
 def make_tenant(admin, name):
-    """A pipeline with two collaborators."""
+    """Two independent workspaces, each assigned exactly one collaborator."""
     created = admin.post('/api/admin/pipelines', json={'name': name})
     assert created.status_code == 201, created.text
     pipeline = created.json()
     suffix = name.lstrip('@').replace('_', '')[:10]
-    for username in (f'ctv_{suffix}_ana', f'ctv_{suffix}_binh'):
+    second = admin.post('/api/admin/pipelines', json={'name': name + '-second'}).json()
+    pipeline['other_pipeline_id'] = second['id']
+    for username, tenant in ((f'ctv_{suffix}_ana', pipeline['id']), (f'ctv_{suffix}_binh', second['id'])):
         member = admin.post('/api/admin/users', json={
-            'username': username, 'password': CTV_PASSWORD, 'pipeline_id': pipeline['id']})
+            'username': username, 'password': CTV_PASSWORD, 'pipeline_id': tenant})
         assert member.status_code == 201, member.text
     return pipeline
 
@@ -145,11 +147,12 @@ def test_approved_and_published_account_are_recorded(client):
     suffix = pipeline['name'].lstrip('@').replace('_', '')[:10]
     content = seed_content(client, pipeline['id'], members[f'ctv_{suffix}_ana']['id'], 'Cua Ana')
     with m.db() as conn:
-        m.analytics_worker.sync_attribution(conn, 'group_post', content['post_id'],
+        conn.execute("UPDATE jobs SET verification_status='verified',permalink=? WHERE id=?", ('https://www.facebook.com/groups/fixture/posts/local/',content['job_id']))
+        m.analytics_worker.sync_attribution(conn, 'group_post', content['job_id'],
                                              created_by=members[f'ctv_{suffix}_ana']['id'],
                                              approved_by=1, published_by=content['account_id'])
         row = conn.execute("""SELECT * FROM post_attribution WHERE post_id=?""",
-                           (content['post_id'],)).fetchone()
+                           (content['job_id'],)).fetchone()
     assert row['created_by_ctv_id'] == members[f'ctv_{suffix}_ana']['id']
     assert row['approved_by_user_id'] == 1
     assert row['published_by_account_id'] == content['account_id']
@@ -279,7 +282,7 @@ def test_collaborator_with_permission_sees_only_their_own_content(client):
     members = {row['username']: row for row in client.get('/api/admin/users').json()}
     suffix = pipeline['name'].lstrip('@').replace('_', '')[:10]
     seed_content(client, pipeline['id'], members[f'ctv_{suffix}_ana']['id'], 'Cua Ana')
-    seed_content(client, pipeline['id'], members[f'ctv_{suffix}_binh']['id'], 'Cua Binh')
+    seed_content(client, pipeline['other_pipeline_id'], members[f'ctv_{suffix}_binh']['id'], 'Cua Binh')
 
     client.patch(f"/api/admin/users/{members[f'ctv_{suffix}_ana']['id']}",
                  json={'permissions': ['analytics.view', 'facebook.view', 'groups.view',
@@ -314,7 +317,7 @@ def test_filter_by_account_and_collaborator(client):
     members = {row['username']: row for row in client.get('/api/admin/users').json()}
     suffix = pipeline['name'].lstrip('@').replace('_', '')[:10]
     first = seed_content(client, pipeline['id'], members[f'ctv_{suffix}_ana']['id'], 'A')
-    seed_content(client, pipeline['id'], members[f'ctv_{suffix}_binh']['id'], 'B')
+    seed_content(client, pipeline['other_pipeline_id'], members[f'ctv_{suffix}_binh']['id'], 'B')
 
     report = client.get(f"/api/admin/analytics/pipelines/{pipeline['id']}?days=90"
                         f"&account_id={first['account_id']}").json()
@@ -322,7 +325,7 @@ def test_filter_by_account_and_collaborator(client):
 
     report = client.get(f"/api/admin/analytics/pipelines/{pipeline['id']}?days=90"
                         f"&ctv_id={members[f'ctv_{suffix}_binh']['id']}").json()
-    assert report['kpis']['total'] == 1, report['kpis']
+    assert report['kpis']['total'] == 0, report['kpis']
 
 
 # --- 12. a collector that fails never breaks the queue -------------------------

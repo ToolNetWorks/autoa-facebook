@@ -39,6 +39,9 @@ def create_campaign(conn, pipeline_id: int, group_ids: list[int], principal, cap
     if lookup_group is None or lookup_account is None:
         raise ValueError("create_campaign cần hàm tra cứu group và account")
 
+    # Serialize plan + idempotency check + inserts even before the first write.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     plan = group_post_validator.validate_selection(
         conn, pipeline_id, group_ids, principal, lookup_group, lookup_account, may_publish,
         scheduled=scheduled_at)
@@ -49,6 +52,24 @@ def create_campaign(conn, pipeline_id: int, group_ids: list[int], principal, cap
                 "deferred": plan.get("deferred") or [], "duplicates": [],
                 "selected": plan["selected"], "limit": plan["limit"], "published": False}
 
+    day = scheduled_at.strftime("%Y-%m-%d")
+    duplicates = []
+    remaining = []
+    for item in plan["ready"]:
+        exists = conn.execute("SELECT id FROM jobs WHERE pipeline_id=? AND idempotency_key=?",
+            (pipeline_id, job_key(pipeline_id, item["group_id"], item["account_id"], day))).fetchone()
+        if exists:
+            duplicates.append({"group_id": item["group_id"], "label": item["label"],
+                               "reason": "Bài này đã có trong hàng đợi"})
+        else:
+            remaining.append(item)
+    plan["ready"] = remaining
+    plan["skipped"].extend(duplicates)
+    if not remaining:
+        return {"post_id": None, "jobs": [], "skipped": plan["skipped"],
+                "deferred": plan.get("deferred", []), "duplicates": duplicates,
+                "selected": plan["selected"], "limit": plan["limit"], "published": False}
+
     owner = resource_owner(principal) if resource_owner else None
     post = conn.execute("""INSERT INTO posts(pipeline_id,body,media_json,created_at,anonymous_only,
                                            ai_record_id,owner_user_id)
@@ -56,13 +77,11 @@ def create_campaign(conn, pipeline_id: int, group_ids: list[int], principal, cap
                          (int(pipeline_id), caption, json.dumps(media_paths), iso(),
                           ai_record_id, owner))
     post_id = post.lastrowid
-    analytics_worker.sync_attribution(conn, "group_post", post_id, created_by=owner)
 
     day = scheduled_at.strftime("%Y-%m-%d")
     created: list[dict] = []
     skipped: list[dict] = list(plan["skipped"])
     deferred: list[dict] = list(plan.get("deferred") or [])
-    duplicates: list[dict] = []
     for item in plan["ready"]:
         key = job_key(pipeline_id, item["group_id"], item["account_id"], day)
         exists = conn.execute("""SELECT id FROM jobs WHERE pipeline_id=? AND idempotency_key=?""",
@@ -85,13 +104,15 @@ def create_campaign(conn, pipeline_id: int, group_ids: list[int], principal, cap
             VALUES(?,?,?,?,?,?,?,?,?,?,'pending','unverified',?)""",
             (post_id, item["group_id"], item["account_id"], int(pipeline_id), state, details,
              iso(scheduled_at), iso(), item["posting_mode"], item["nickname"], key))
+        analytics_worker.sync_attribution(conn, "group_post", cursor.lastrowid,
+                                          created_by=owner, pipeline_id=pipeline_id)
         created.append({"job_id": cursor.lastrowid, "group_id": item["group_id"],
                         "label": item["label"], "account_id": item["account_id"],
                         "posting_mode": item["posting_mode"], "nickname": item["nickname"],
                         "decision": item.get("decision", "")})
     return {"post_id": post_id, "jobs": created, "skipped": skipped,
             "deferred": deferred, "duplicates": duplicates, "selected": plan["selected"],
-            "limit": plan["limit"], "published": may_publish and not (ai_record_id and not ai_caption)}
+            "limit": plan["limit"], "published": False}
 
 
 def iso(value: datetime | None = None) -> str:

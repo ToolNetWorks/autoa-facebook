@@ -31,8 +31,8 @@ def mark_blocked(conn, job: dict, state: str, details: str, now: str) -> None:
     conn.execute('''UPDATE jobs SET state=?,posting_status=?,details=?,failure_reason=?,updated_at=?
         WHERE id=? AND pipeline_id=?''', (state, state, details, details, now, job['id'], job['pipeline_id']))
     conn.execute('''UPDATE auto_post_jobs SET status=?,error=?,defer_reason=?,updated_at=?
-        WHERE post_id=? AND pipeline_id=?''',
-        (state, details, details, now, job['post_id'], job['pipeline_id']))
+        WHERE post_id=? AND pipeline_id=? AND account_id=? AND group_id=?''',
+        (state, details, details, now, job['post_id'], job['pipeline_id'], job['account_id'], job['group_id']))
 
 
 def worker_payload(job: dict, data_root: Path) -> dict:
@@ -49,3 +49,31 @@ def worker_payload(job: dict, data_root: Path) -> dict:
         'posting_mode': job.get('requested_posting_mode') or 'anonymous',
         'nickname': job.get('requested_nickname') or '',
     }
+
+
+def validated_result_state(result: dict, job: dict) -> str:
+    """Reject unsupported success claims at the subprocess/DB boundary."""
+    status = result.get('state', 'needs_review')
+    if status not in {'failed','needs_review','submitted_unverified','pending_approval','posted'}:
+        return 'needs_review'
+    if status != 'posted':
+        return status
+    if result.get('verification') != 'verified' or not verified_group_post_link(
+            result.get('permalink'), job.get('group_url') or job.get('url')):
+        return 'submitted_unverified'
+    return 'posted'
+
+
+def verified_group_post_link(permalink, expected_group) -> bool:
+    """A Group landing URL or another Group's post can never be post evidence."""
+    from urllib.parse import urlparse
+    from services.posting_preflight import same_group
+    import re
+    try:
+        link = urlparse(str(permalink or ''))
+        return bool(link.scheme == 'https' and not link.username and not link.password
+                    and link.port in (None,443)
+                    and re.fullmatch(r'/groups/[^/]+/(?:posts|permalink)/[^/]+/?',link.path)
+                    and same_group(str(permalink),str(expected_group or '')))
+    except ValueError:
+        return False
