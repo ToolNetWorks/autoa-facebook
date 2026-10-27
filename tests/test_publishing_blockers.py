@@ -19,10 +19,10 @@ from test_group_worker_contract import due_job, approved_album_job, idle_backgro
 
 
 def test_share_namespace_and_unicode_roundtrip():
-    url, key = normalize_group_url('https://m.facebook.com/share/g/19XXY4GjsM/?ref=test')
-    assert url == 'https://www.facebook.com/share/g/19XXY4GjsM/'
-    assert key == 'share:19XXY4GjsM'
-    assert key != normalize_group_url('19XXY4GjsM')[1]
+    url, key = normalize_group_url('https://m.facebook.com/share/g/FixtureShareAb12/?ref=test')
+    assert url == 'https://www.facebook.com/share/g/FixtureShareAb12/'
+    assert key == 'share:FixtureShareAb12'
+    assert key != normalize_group_url('FixtureShareAb12')[1]
     raw = 'https://www.facebook.com/groups/cà-phê/'
     encoded, key = normalize_group_url(raw)
     assert '%C3%A0' in encoded

@@ -52,28 +52,6 @@ def test_rejected_notices_still_present():
 
 # --- 2. newest_permalink nhận diện URL /pending_posts/ -----------------------
 
-def test_newest_permalink_source_includes_pending_posts():
-    """JavaScript trong newest_permalink phải kiểm tra URL chứa '/pending_posts/'.
-
-    Bài ẩn danh chờ duyệt có URL: .../groups/{id}/pending_posts/{id}/
-    Phát hiện từ HAR: story.url chứa 'pending_posts'.
-    """
-    import inspect
-    source = inspect.getsource(post_verifier.newest_permalink)
-    assert "/pending_posts/" in source, (
-        "JavaScript trong newest_permalink phải nhận diện URL /pending_posts/ "
-        "để lấy permalink từ bài đăng ẩn danh chờ duyệt"
-    )
-
-
-def test_newest_permalink_source_still_includes_posts_and_permalink():
-    """Các URL /posts/ và /permalink/ phải vẫn được nhận diện."""
-    import inspect
-    source = inspect.getsource(post_verifier.newest_permalink)
-    assert "/posts/" in source
-    assert "/permalink/" in source
-
-
 # --- 3. status_from_job ánh xạ trạng thái đúng -------------------------------
 
 def test_status_from_job_pending_approval():

@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any
 from urllib.parse import urlsplit
+from services.facebook_selectors import current_registry
 
 MESSAGES = {
     'connected': 'Facebook đã xác minh phiên đăng nhập.',
@@ -23,17 +24,15 @@ async def inspect_session(page: Any, context: Any) -> dict:
     elif any(x in path for x in ('/login', '/logout')):
         status = 'expired'
     if not status:
-        inputs = page.locator('input[name="email"], input[name="pass"]')
+        inputs = current_registry().all(page, 'login_inputs')
         if any([await item.is_visible() for item in await inputs.all()]):
             status = 'expired'
     if not status:
-        security = page.get_by_role('dialog').filter(has_text=re.compile(
-            r'confirm your identity|security check|CAPTCHA|xác minh danh tính|kiểm tra bảo mật', re.I))
+        security = current_registry().all(page, 'dialogs').filter(has_text=current_registry().pattern('security'))
         if any([await item.is_visible() for item in await security.all()]):
             status = 'checkpoint'
     if not status:
-        blocked = page.locator('[role="dialog"], [role="alert"]').filter(has_text=re.compile(
-            r'action blocked|you can.t post right now|temporarily blocked|try again later|tạm thời bị chặn|bạn không thể đăng', re.I))
+        blocked = current_registry().all(page, 'restriction_scope').filter(has_text=current_registry().pattern('restriction'))
         if any([await item.is_visible() for item in await blocked.all()]):
             status = 'restricted'
     uid = ''
@@ -45,7 +44,7 @@ async def inspect_session(page: Any, context: Any) -> dict:
         if not uid:
             status = 'expired'
         else:
-            controls = page.get_by_role('button', name=ACCOUNT_CONTROL)
+            controls = current_registry().all(page, 'account_control')
             try:
                 await controls.first.wait_for(state='visible', timeout=3000)
                 status = 'connected'

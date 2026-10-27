@@ -1,0 +1,739 @@
+{
+  "version": "v2",
+  "profiles": {
+    "desktop": {
+      "composer": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Bạn đang nghĩ gì|Bạn viết gì|Viết gì đó|Hãy viết gì đó|Tạo bài viết",
+            "en": "Write something|What's on your mind|Create post"
+          }
+        },
+        {
+          "css": "[role='button'][aria-label='Tạo bài viết'], [role='button'][aria-label='Create post']"
+        }
+      ],
+      "editor": [
+        {
+          "css": "[contenteditable='true'][role='textbox']"
+        },
+        {
+          "css": "[contenteditable='true']"
+        }
+      ],
+      "publish": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Đăng|Gửi|Đăng bài",
+            "en": "Post|Send|Publish"
+          }
+        }
+      ],
+      "media": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Ảnh/video|Ảnh / Video|Ảnh|Chọn ảnh|Chọn từ máy tính",
+            "en": "Photo/video|Photos/videos|Photo|Photos|Attach a photo or video|Upload photos?"
+          }
+        }
+      ],
+      "file_input": [
+        {
+          "css": "input[type='file'][accept*='image'], input[type='file'][accept*='.jpg'], input[type='file'][accept*='.png']"
+        },
+        {
+          "css": "input[type='file']:not([accept]), input[type='file'][accept='']"
+        }
+      ],
+      "preview": [
+        {
+          "css": "img[src^='blob:'], img[src^='data:image/']"
+        }
+      ],
+      "remove_photo": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Xóa ảnh|Gỡ ảnh",
+            "en": "Remove photo|Remove image"
+          }
+        }
+      ],
+      "anonymous_composer": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Bài viết ẩn danh|Đăng ẩn danh",
+            "en": "Anonymous post|Post anonymously"
+          }
+        }
+      ],
+      "anonymous_notice_continue": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Tạo bài viết ẩn danh|OK|Đồng ý|Đã hiểu|Tôi hiểu",
+            "en": "Create anonymous post|OK|Got it"
+          }
+        }
+      ],
+      "dialogs": [
+        {
+          "css": "[role=\"dialog\"]"
+        }
+      ],
+      "editable": [
+        {
+          "css": "[contenteditable=\"true\"]"
+        }
+      ],
+      "progress": [
+        {
+          "css": "[role=\"progressbar\"], [aria-busy=\"true\"]"
+        }
+      ],
+      "menus": [
+        {
+          "css": "[role=\"menu\"]"
+        }
+      ],
+      "menu_items": [
+        {
+          "css": "[role=\"menuitem\"],li,[role=\"option\"]"
+        }
+      ],
+      "identity_exclusions": [
+        {
+          "css": "[contenteditable=\"true\"], [role=\"menu\"], [role=\"option\"], [role=\"article\"]"
+        }
+      ],
+      "articles": [
+        {
+          "css": "[role=\"main\"] [role=\"article\"], [role=\"feed\"] [role=\"article\"], main article"
+        }
+      ],
+      "article_root": [
+        {
+          "css": "[role=\"article\"],article"
+        }
+      ],
+      "message": [
+        {
+          "css": "[data-ad-preview=\"message\"],[data-ad-comet-preview=\"message\"],p"
+        }
+      ],
+      "authors": [
+        {
+          "css": "h2,h3,[data-ad-rendering-role=\"profile_name\"]"
+        }
+      ],
+      "images": [
+        {
+          "css": "img"
+        }
+      ],
+      "links": [
+        {
+          "css": "a[href]"
+        }
+      ],
+      "timestamp": [
+        {
+          "css": "time[datetime]"
+        }
+      ],
+      "notice_scope": [
+        {
+          "css": "[role=\"status\"], [role=\"status\"] *, [role=\"alert\"], [role=\"alert\"] *, [role=\"dialog\"], [role=\"dialog\"] *"
+        }
+      ],
+      "login_inputs": [
+        {
+          "css": "input[name=\"email\"],input[name=\"pass\"],input[type=\"password\"]"
+        }
+      ],
+      "body": [
+        {
+          "css": "body"
+        }
+      ],
+      "heading": [
+        {
+          "css": "h1"
+        }
+      ],
+      "restriction_scope": [
+        {
+          "css": "[role=\"dialog\"],[role=\"alert\"]"
+        }
+      ],
+      "anonymous_switch": [
+        {
+          "role": "switch",
+          "names": {
+            "vi": "Đăng ẩn danh|Bài viết ẩn danh|Thành viên ẩn danh|Người tham gia ẩn danh",
+            "en": "Post anonymously|Anonymous post|Anonymous member|Anonymous participant"
+          },
+          "exact": false
+        }
+      ],
+      "anonymous_checkbox": [
+        {
+          "role": "checkbox",
+          "names": {
+            "vi": "Đăng ẩn danh|Bài viết ẩn danh|Thành viên ẩn danh|Người tham gia ẩn danh",
+            "en": "Post anonymously|Anonymous post|Anonymous member|Anonymous participant"
+          },
+          "exact": false
+        }
+      ],
+      "anonymous_button": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Đăng ẩn danh|Bài viết ẩn danh|Thành viên ẩn danh|Người tham gia ẩn danh",
+            "en": "Post anonymously|Anonymous post|Anonymous member|Anonymous participant"
+          },
+          "exact": false
+        }
+      ],
+      "identity_control": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Chỉnh sửa hồ sơ|Đổi danh tính|Đăng.*với tư cách|Đăng như",
+            "en": "Edit profile|Post as|Use another identity"
+          },
+          "exact": false
+        }
+      ],
+      "account_control": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Tài khoản.*trang cá nhân|Tài khoản của bạn|Ảnh đại diện của bạn|Hồ sơ của bạn",
+            "en": "Your profile|Your account"
+          },
+          "exact": false
+        }
+      ],
+      "group_joined": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Đã tham gia",
+            "en": "Joined"
+          },
+          "exact": true
+        }
+      ],
+      "group_join": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Tham gia nhóm",
+            "en": "Join group"
+          },
+          "exact": true
+        }
+      ],
+      "reel_create": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Tạo thước phim|Tạo reel",
+            "en": "Create reel"
+          },
+          "exact": false
+        },
+        {
+          "role": "link",
+          "names": {
+            "vi": "Tạo thước phim|Tạo reel",
+            "en": "Create reel"
+          },
+          "exact": false
+        }
+      ],
+      "reel_upload": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Thêm video|Chọn video",
+            "en": "Add video|Upload video"
+          },
+          "exact": false
+        }
+      ],
+      "reel_description": [
+        {
+          "role": "textbox",
+          "names": {
+            "vi": "Mô tả thước phim|Mô tả reel",
+            "en": "Describe your reel"
+          },
+          "exact": false
+        }
+      ],
+      "reel_next": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Tiếp|Tiếp theo",
+            "en": "Next"
+          },
+          "exact": true
+        }
+      ],
+      "reel_publish": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Đăng thước phim|Đăng reel",
+            "en": "Publish|Publish reel"
+          },
+          "exact": true
+        }
+      ],
+      "anonymous_notice_title": [
+        {
+          "text": true,
+          "names": {
+            "vi": "^(Bài viết ẩn danh)$",
+            "en": "^(Post anonymously)$"
+          }
+        }
+      ],
+      "security": [
+        {
+          "text": true,
+          "names": {
+            "vi": "xác minh danh tính|kiểm tra bảo mật",
+            "en": "confirm your identity|security check|CAPTCHA"
+          }
+        }
+      ],
+      "restriction": [
+        {
+          "text": true,
+          "names": {
+            "vi": "tạm thời bị chặn|bạn không thể đăng",
+            "en": "action blocked|you can.t post right now|temporarily blocked|try again later"
+          }
+        }
+      ],
+      "unavailable": [
+        {
+          "text": true,
+          "names": {
+            "vi": "Bạn hiện không xem được nội dung này|nội dung không tồn tại",
+            "en": "This content isn.t available"
+          }
+        }
+      ],
+      "reel_context": [
+        {
+          "text": true,
+          "names": {
+            "vi": "Reel của bạn|Mô tả reel|thước phim",
+            "en": "Your reel|Describe your reel"
+          }
+        }
+      ],
+      "dismiss_popup": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Đóng|Để sau|Bỏ qua",
+            "en": "Close|Not now|Skip"
+          }
+        }
+      ]
+    },
+    "desktop_semantic": {
+      "composer": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Bạn đang nghĩ gì|Bạn viết gì|Viết gì đó|Hãy viết gì đó|Tạo bài viết",
+            "en": "Write something|What's on your mind|Create post"
+          }
+        }
+      ],
+      "editor": [
+        {
+          "css": "[contenteditable='true'][role='textbox']"
+        },
+        {
+          "css": "[contenteditable='true']"
+        }
+      ],
+      "publish": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Đăng|Gửi|Đăng bài",
+            "en": "Post|Send|Publish"
+          }
+        }
+      ],
+      "media": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Ảnh/video|Ảnh / Video|Ảnh|Chọn ảnh|Chọn từ máy tính",
+            "en": "Photo/video|Photos/videos|Photo|Photos|Attach a photo or video|Upload photos?"
+          }
+        }
+      ],
+      "file_input": [
+        {
+          "css": "input[type='file'][accept*='image'], input[type='file'][accept*='.jpg'], input[type='file'][accept*='.png']"
+        },
+        {
+          "css": "input[type='file']:not([accept]), input[type='file'][accept='']"
+        }
+      ],
+      "preview": [
+        {
+          "css": "img[src^='blob:'], img[src^='data:image/']"
+        }
+      ],
+      "remove_photo": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Xóa ảnh|Gỡ ảnh",
+            "en": "Remove photo|Remove image"
+          }
+        }
+      ],
+      "anonymous_composer": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Bài viết ẩn danh|Đăng ẩn danh",
+            "en": "Anonymous post|Post anonymously"
+          }
+        }
+      ],
+      "anonymous_notice_continue": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Tạo bài viết ẩn danh|OK|Đồng ý|Đã hiểu|Tôi hiểu",
+            "en": "Create anonymous post|OK|Got it"
+          }
+        }
+      ],
+      "dialogs": [
+        {
+          "css": "[role=\"dialog\"]"
+        }
+      ],
+      "editable": [
+        {
+          "css": "[contenteditable=\"true\"]"
+        }
+      ],
+      "progress": [
+        {
+          "css": "[role=\"progressbar\"], [aria-busy=\"true\"]"
+        }
+      ],
+      "menus": [
+        {
+          "css": "[role=\"menu\"]"
+        }
+      ],
+      "menu_items": [
+        {
+          "css": "[role=\"menuitem\"],li,[role=\"option\"]"
+        }
+      ],
+      "identity_exclusions": [
+        {
+          "css": "[contenteditable=\"true\"], [role=\"menu\"], [role=\"option\"], [role=\"article\"]"
+        }
+      ],
+      "articles": [
+        {
+          "css": "[role=\"main\"] [role=\"article\"], [role=\"feed\"] [role=\"article\"], main article"
+        }
+      ],
+      "article_root": [
+        {
+          "css": "[role=\"article\"],article"
+        }
+      ],
+      "message": [
+        {
+          "css": "[data-ad-preview=\"message\"],[data-ad-comet-preview=\"message\"],p"
+        }
+      ],
+      "authors": [
+        {
+          "css": "h2,h3,[data-ad-rendering-role=\"profile_name\"]"
+        }
+      ],
+      "images": [
+        {
+          "css": "img"
+        }
+      ],
+      "links": [
+        {
+          "css": "a[href]"
+        }
+      ],
+      "timestamp": [
+        {
+          "css": "time[datetime]"
+        }
+      ],
+      "notice_scope": [
+        {
+          "css": "[role=\"status\"], [role=\"status\"] *, [role=\"alert\"], [role=\"alert\"] *, [role=\"dialog\"], [role=\"dialog\"] *"
+        }
+      ],
+      "login_inputs": [
+        {
+          "css": "input[name=\"email\"],input[name=\"pass\"],input[type=\"password\"]"
+        }
+      ],
+      "body": [
+        {
+          "css": "body"
+        }
+      ],
+      "heading": [
+        {
+          "css": "h1"
+        }
+      ],
+      "restriction_scope": [
+        {
+          "css": "[role=\"dialog\"],[role=\"alert\"]"
+        }
+      ],
+      "anonymous_switch": [
+        {
+          "role": "switch",
+          "names": {
+            "vi": "Đăng ẩn danh|Bài viết ẩn danh|Thành viên ẩn danh|Người tham gia ẩn danh",
+            "en": "Post anonymously|Anonymous post|Anonymous member|Anonymous participant"
+          },
+          "exact": false
+        }
+      ],
+      "anonymous_checkbox": [
+        {
+          "role": "checkbox",
+          "names": {
+            "vi": "Đăng ẩn danh|Bài viết ẩn danh|Thành viên ẩn danh|Người tham gia ẩn danh",
+            "en": "Post anonymously|Anonymous post|Anonymous member|Anonymous participant"
+          },
+          "exact": false
+        }
+      ],
+      "anonymous_button": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Đăng ẩn danh|Bài viết ẩn danh|Thành viên ẩn danh|Người tham gia ẩn danh",
+            "en": "Post anonymously|Anonymous post|Anonymous member|Anonymous participant"
+          },
+          "exact": false
+        }
+      ],
+      "identity_control": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Chỉnh sửa hồ sơ|Đổi danh tính|Đăng.*với tư cách|Đăng như",
+            "en": "Edit profile|Post as|Use another identity"
+          },
+          "exact": false
+        }
+      ],
+      "account_control": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Tài khoản.*trang cá nhân|Tài khoản của bạn|Ảnh đại diện của bạn|Hồ sơ của bạn",
+            "en": "Your profile|Your account"
+          },
+          "exact": false
+        }
+      ],
+      "group_joined": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Đã tham gia",
+            "en": "Joined"
+          },
+          "exact": true
+        }
+      ],
+      "group_join": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Tham gia nhóm",
+            "en": "Join group"
+          },
+          "exact": true
+        }
+      ],
+      "reel_create": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Tạo thước phim|Tạo reel",
+            "en": "Create reel"
+          },
+          "exact": false
+        },
+        {
+          "role": "link",
+          "names": {
+            "vi": "Tạo thước phim|Tạo reel",
+            "en": "Create reel"
+          },
+          "exact": false
+        }
+      ],
+      "reel_upload": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Thêm video|Chọn video",
+            "en": "Add video|Upload video"
+          },
+          "exact": false
+        }
+      ],
+      "reel_description": [
+        {
+          "role": "textbox",
+          "names": {
+            "vi": "Mô tả thước phim|Mô tả reel",
+            "en": "Describe your reel"
+          },
+          "exact": false
+        }
+      ],
+      "reel_next": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Tiếp|Tiếp theo",
+            "en": "Next"
+          },
+          "exact": true
+        }
+      ],
+      "reel_publish": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Đăng thước phim|Đăng reel",
+            "en": "Publish|Publish reel"
+          },
+          "exact": true
+        }
+      ],
+      "anonymous_notice_title": [
+        {
+          "text": true,
+          "names": {
+            "vi": "^(Bài viết ẩn danh)$",
+            "en": "^(Post anonymously)$"
+          }
+        }
+      ],
+      "security": [
+        {
+          "text": true,
+          "names": {
+            "vi": "xác minh danh tính|kiểm tra bảo mật",
+            "en": "confirm your identity|security check|CAPTCHA"
+          }
+        }
+      ],
+      "restriction": [
+        {
+          "text": true,
+          "names": {
+            "vi": "tạm thời bị chặn|bạn không thể đăng",
+            "en": "action blocked|you can.t post right now|temporarily blocked|try again later"
+          }
+        }
+      ],
+      "unavailable": [
+        {
+          "text": true,
+          "names": {
+            "vi": "Bạn hiện không xem được nội dung này|nội dung không tồn tại",
+            "en": "This content isn.t available"
+          }
+        }
+      ],
+      "reel_context": [
+        {
+          "text": true,
+          "names": {
+            "vi": "Reel của bạn|Mô tả reel|thước phim",
+            "en": "Your reel|Describe your reel"
+          }
+        }
+      ],
+      "dismiss_popup": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Đóng|Để sau|Bỏ qua",
+            "en": "Close|Not now|Skip"
+          }
+        }
+      ]
+    }
+  },
+  "notices": {
+    "published": [
+      "text=Your post is now published",
+      "text=Bài viết của bạn hiện đã được đăng",
+      "text=Đã đăng bài viết của bạn",
+      "text=Post published"
+    ],
+    "pending": [
+      "text=Sent for approval",
+      "text=Đã gửi để phê duyệt",
+      "text=Đang chờ quản trị viên duyệt",
+      "text=Đang chờ duyệt",
+      "text=Đã gửi để duyệt",
+      "text=Hệ thống đã gửi bài viết cho quản trị viên nhóm",
+      "text=Your post is pending approval"
+    ],
+    "rejected": [
+      "text=You can't post in this group",
+      "text=Bạn không thể đăng bài trong nhóm này",
+      "text=Your post was rejected",
+      "text=Bài viết của bạn đã bị từ chối"
+    ]
+  }
+}

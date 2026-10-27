@@ -22,7 +22,8 @@ class PublishingDOMTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.picture = Path(self.temp.name) / 'image.png'
-        self.picture.write_bytes(PNG)
+        from PIL import Image
+        Image.new('RGB', (320,240), 'steelblue').save(self.picture)
         self.pw = await async_playwright().start()
         self.browser = await self.pw.chromium.launch(headless=True, args=['--no-sandbox'])
         self.context = await self.browser.new_context()
@@ -37,6 +38,13 @@ class PublishingDOMTests(unittest.IsolatedAsyncioTestCase):
         await self.pw.stop()
         self.temp.cleanup()
 
+    async def test_semantic_profile_and_reel_publish_ambiguity(self):
+        await self.page.set_content('<button>Create post</button><button>Publish reel</button><button>Publish reel</button>')
+        registry = SelectorRegistry(profile='desktop_semantic', locales=('en',))
+        self.assertEqual(await (await registry.resolve(self.page, 'composer')).inner_text(), 'Create post')
+        with self.assertRaises(SelectorResolutionError):
+            await registry.resolve(self.page, 'reel_publish')
+
     async def test_hidden_input_preview_caption_and_scoped_submit(self):
         await (await find_editor(self.page, self.dialog)).fill('Nội dung đầy đủ')
         self.assertTrue(await upload_media(self.page, [self.picture], dialog=self.dialog, timeout=1000))
@@ -49,7 +57,7 @@ class PublishingDOMTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome['state'], 'published')
         self.assertIn('permalink', outcome)
         self.assertEqual(await self.page.evaluate('submissions'), 1)
-        link = await newest_permalink(self.page, 'Nội dung đầy đủ', expected_group=self.page.url, exclude=previous)
+        link = await newest_permalink(self.page, 'Nội dung đầy đủ', expected_group=self.page.url, exclude=previous, expected_image=self.picture, submitted_at=__import__('time').time(), expected_identity='Anonymous member')
         self.assertIn('/groups/allowed/posts/new-post/', link)
         self.assertEqual(await newest_permalink(self.page, 'khác', expected_group=self.page.url), '')
         self.assertEqual(await newest_permalink(self.page, 'Nội dung đầy đủ', expected_group='https://www.facebook.com/groups/other/'), '')
@@ -266,3 +274,62 @@ class PublishingDOMTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed['code'],'CONTENT_UNAVAILABLE')
         self.assertFalse(observed['accessible'])
         self.assertIsNone(observed['is_member'])
+
+
+class TargetEvidenceTests(PublishingDOMTests):
+    # Reuse only setup helpers, not the parent test suite (collected below).
+    async def verify_target(self):
+        import time
+        return await newest_permalink(self.page, 'Target caption', expected_group=self.page.url,
+            expected_image=self.picture, submitted_at=time.time(), expected_identity='Anonymous member')
+
+    async def prepare_target(self):
+        await (await find_editor(self.page,self.dialog)).fill('Target caption')
+        await upload_media(self.page,[self.picture],dialog=self.dialog,timeout=1000)
+        await (await find_publish_button(self.page,self.dialog)).click()
+        self.assertTrue(await self.verify_target())
+
+    async def test_avatar_only_cannot_verify(self):
+        await self.prepare_target()
+        await self.page.locator('article img').evaluate("el=>{el.alt='Profile picture';el.parentElement.href='/someone/';}")
+        self.assertEqual(await self.verify_target(),'')
+
+    async def test_large_avatar_in_author_heading_cannot_verify(self):
+        await self.prepare_target()
+        await self.page.locator('article').evaluate("a=>a.querySelector('h3').append(a.querySelector('a[href*=photo]'))")
+        self.assertEqual(await self.verify_target(),'')
+
+    async def test_wrong_photo_cannot_verify(self):
+        from PIL import Image
+        await self.prepare_target()
+        Image.new('RGB',(320,240),'red').save(self.picture)
+        self.assertEqual(await self.verify_target(),'')
+
+    async def test_duplicate_caption_and_photo_is_ambiguous(self):
+        await self.prepare_target()
+        await self.page.locator('article').evaluate("a=>{let b=a.cloneNode(true);b.querySelector('a[href*=posts]').href='/groups/allowed/posts/another/';a.parentElement.append(b);}")
+        self.assertEqual(await self.verify_target(),'')
+
+    async def test_comment_photo_cannot_verify_outer_post(self):
+        await self.prepare_target()
+        await self.page.locator('article').evaluate("a=>{const nested=document.createElement('div');nested.setAttribute('role','article');nested.append(a.querySelector('a[href*=photo]'));a.append(nested);}")
+        self.assertEqual(await self.verify_target(),'')
+
+    async def test_old_timestamp_or_wrong_identity_cannot_verify(self):
+        await self.prepare_target()
+        await self.page.locator('article h3').evaluate("el=>el.textContent='Someone else'")
+        self.assertEqual(await self.verify_target(),'')
+        await self.page.locator('article h3').evaluate("el=>el.textContent='Anonymous member'")
+        await self.page.locator('article a[href*=posts]').evaluate("el=>el.innerHTML='<time datetime=2020-01-01T00:00:00Z>Just now</time>'")
+        self.assertEqual(await self.verify_target(),'')
+
+    async def test_pending_article_remains_pending_link(self):
+        await self.prepare_target()
+        await self.page.locator('article a[href*=posts]').evaluate("el=>el.href='/groups/allowed/pending_posts/draft/'")
+        self.assertIn('/pending_posts/',await self.verify_target())
+
+
+# Avoid executing the inherited integration tests a second time.
+for _name in list(PublishingDOMTests.__dict__):
+    if _name.startswith('test_'):
+        setattr(TargetEvidenceTests, _name, None)

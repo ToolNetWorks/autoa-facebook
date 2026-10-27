@@ -10,7 +10,7 @@ import re
 from typing import Any, Optional
 
 from playwright.async_api import Page
-from services.facebook_selectors import active_composer_dialog, SelectorRegistry
+from services.facebook_selectors import active_composer_dialog, current_registry
 from services import nickname_repository
 
 MODE_ANONYMOUS = "anonymous"
@@ -81,9 +81,9 @@ async def anonymous_mode_available(page: Page) -> bool | None:
 
     ``None`` có nghĩa không đọc được điều khiển, khác với việc không hỗ trợ.
     """
-    for locator in [page.get_by_role("switch", name=ANONYMOUS_RE),
-                    page.get_by_role("checkbox", name=ANONYMOUS_RE),
-                    page.get_by_role("button", name=ANONYMOUS_RE)]:
+    for locator in [current_registry().all(page, 'anonymous_switch'),
+                    current_registry().all(page, 'anonymous_checkbox'),
+                    current_registry().all(page, 'anonymous_button')]:
         try:
             if await locator.count() and await locator.first.is_visible():
                 return True
@@ -94,13 +94,13 @@ async def anonymous_mode_available(page: Page) -> bool | None:
 
 async def dismiss_anonymous_notice(page: Page) -> bool:
     """Continue the information-only anonymous notice, never a Publish button."""
-    for dialog in await page.get_by_role("dialog").all():
-        if not await dialog.is_visible() or await dialog.locator('[contenteditable="true"]').count():
+    for dialog in await current_registry().all(page, 'dialogs').all():
+        if not await dialog.is_visible() or await current_registry().all(dialog, 'editable').count():
             continue
-        title = dialog.get_by_text(ANONYMOUS_NOTICE_RE)
+        title = current_registry().all(dialog, 'anonymous_notice_title')
         if not await title.count():
             continue
-        control = await SelectorRegistry().resolve(dialog, 'anonymous_notice_continue', timeout=500)
+        control = await current_registry().resolve(dialog, 'anonymous_notice_continue', timeout=500)
         if control is not None:
             await control.click(timeout=5000)
             return True
@@ -113,7 +113,7 @@ async def anonymous_mode_verified(page: Page) -> bool:
     if dialog is None:
         return False
     for role in ("switch", "checkbox"):
-        controls = dialog.get_by_role(role, name=ANONYMOUS_RE)
+        controls = current_registry().all(dialog, 'anonymous_' + role)
         visible = [c for c in await controls.all() if await c.is_visible()]
         if len(visible) > 1:
             return False
@@ -139,7 +139,7 @@ async def require_anonymous_mode(page: Page) -> bool:
     if dialog is None:
         return False
     for role in ("switch", "checkbox", "button"):
-        visible = [c for c in await dialog.get_by_role(role, name=ANONYMOUS_RE).all()
+        visible = [c for c in await current_registry().all(dialog, 'anonymous_' + role).all()
                    if await c.is_visible()]
         if len(visible) > 1:
             return False
@@ -154,12 +154,12 @@ async def open_identity_menu(page: Page) -> Any | None:
     dialog = await active_composer_dialog(page)
     if dialog is None:
         return None
-    controls = dialog.get_by_role("button", name=IDENTITY_CONTROL_RE)
+    controls = current_registry().all(dialog, 'identity_control')
     visible = [c for c in await controls.all() if await c.is_visible()]
     if len(visible) != 1:
         return None
     await visible[0].click(timeout=5000)
-    menus = [m for m in await page.get_by_role("menu").all() if await m.is_visible()]
+    menus = [m for m in await current_registry().all(page, 'menus').all() if await m.is_visible()]
     return menus[0] if len(menus) == 1 else None
 
 
@@ -167,7 +167,7 @@ async def identity_names(menu: Any) -> list[str]:
     """Danh sách danh tính Facebook đang ofer trong menu đã mở."""
     names: list[str] = []
     try:
-        for item in await menu.get_by_role("menuitem").all():
+        for item in await current_registry().all(menu, 'menu_items').all():
             try:
                 text = (await item.inner_text()).strip()
                 if text:
@@ -175,7 +175,7 @@ async def identity_names(menu: Any) -> list[str]:
             except Exception:
                 continue
         if not names:
-            for item in await menu.locator("li, [role=option]").all():
+            for item in await current_registry().all(menu, 'menu_items').all():
                 try:
                     text = (await item.inner_text()).strip()
                     if text:
@@ -192,9 +192,8 @@ async def identity_shown(page: Page, wanted: str) -> bool:
     dialog = await active_composer_dialog(page)
     if dialog is None or not wanted.strip():
         return False
-    for label in await dialog.get_by_text(wanted, exact=True).all():
-        if await label.is_visible() and await label.evaluate("""el =>
-            !el.closest('[contenteditable="true"], [role="menu"], [role="option"], [role="article"]')"""):
+    for label in await current_registry().text(dialog, wanted).all():
+        if await label.is_visible() and await label.evaluate("(el, selector) => !el.closest(selector)", current_registry().css("identity_exclusions")):
             return True
     return False
 
@@ -205,38 +204,10 @@ async def is_facebook_suggested_nickname(name: str) -> bool:
     return bool(FACEBOOK_SUGGESTED_NICKNAME_RE.match(name.strip()))
 
 async def select_nickname_from_facebook_suggestions(page: Page) -> tuple[str, list[str]]:
-    """Chọn biệt danh từ danh sách Facebook đề xuất. Trả về (tên đã chọn, danh sách tên)."""
+    """Compatibility API: inspect options, but never choose an unsolicited identity."""
     menu = await open_identity_menu(page)
-    if menu is None:
-        return "", []
-    
-    names = await identity_names(menu)
-    if not names:
-        return "", []
-    
-    # Tìm biệt danh do Facebook đề xuất (thường là tên ngẫu nhiên như Leo3363, User123, etc.)
-    suggested = []
-    for name in names:
-        if await is_facebook_suggested_nickname(name):
-            suggested.append(name)
-    
-    if suggested:
-        # Chọn biệt danh đầu tiên được đề xuất
-        chosen = suggested[0]
-        try:
-            item = menu.get_by_text(re.compile(rf"^{re.escape(chosen)}$", re.I)).first
-            await item.click(timeout=5000)
-            await page.wait_for_timeout(1200)
-        except Exception:
-            return "", names
-        
-        if await identity_shown(page, chosen):
-            return chosen, names
-        return "", names
-    
-    # Nếu không có biệt danh do Facebook đề xuất, thử tìm biệt danh trong danh sách
-    # (có thể là biệt danh đã được Facebook cấp trước đó)
-    return "", names
+    return "", await identity_names(menu) if menu is not None else []
+
 
 async def save_facebook_nickname_async(pipeline_id: int, account_id: int, group_id: int,
                                        nickname: str, status: str = "confirmed") -> None:
@@ -263,7 +234,7 @@ async def require_nickname_identity(page: Page, pipeline_id: int, account_id: in
     names = await identity_names(menu)
     if not any(same_identity(name, wanted) for name in names):
         return "", names, "not_found"
-    item = menu.get_by_text(wanted, exact=True)
+    item = current_registry().text(menu, wanted)
     if await item.count() != 1 or not await item.is_visible():
         return "", names, "not_found"
     await item.click(timeout=5000)

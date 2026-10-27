@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from services.facebook_session import inspect_session
+from services.facebook_selectors import current_registry
 from services.group_links import FACEBOOK_HOSTS, InvalidGroupLink, normalize_group_url
 from services.posting_preflight import same_group
 
@@ -48,8 +49,8 @@ async def inspect_group_access(page: Any, context: Any, expected: str, response:
         result['code'] = {'expired': 'SESSION_EXPIRED', 'checkpoint': 'CHECKPOINT',
                           'restricted': 'RESTRICTED'}.get(session['status'], 'SESSION_UNKNOWN')
         return result
-    text = await page.locator('body').inner_text(timeout=10000)
-    if re.search(r'Bạn hiện không xem được nội dung này|This content isn.t available|nội dung không tồn tại', text, re.I):
+    text = await current_registry().all(page, 'body').inner_text(timeout=10000)
+    if current_registry().pattern('unavailable').search(text):
         result.update(code='CONTENT_UNAVAILABLE', accessible=False,
                       details='Facebook không cho xem nội dung tại URL này. Chưa xác định Group còn tồn tại hoặc quyền truy cập.')
         return result
@@ -57,13 +58,13 @@ async def inspect_group_access(page: Any, context: Any, expected: str, response:
     if not same_group(page.url, expected) and not redirect:
         result.update(code='UNVERIFIED_DESTINATION', details='Chưa xác minh được Group sau chuyển hướng; chưa gửi bài.')
         return result
-    joined = page.get_by_role('button', name=re.compile(r'^(Đã tham gia|Joined)$', re.I))
-    join = page.get_by_role('button', name=re.compile(r'^(Tham gia nhóm|Join group)$', re.I))
+    joined = current_registry().all(page, 'group_joined')
+    join = current_registry().all(page, 'group_join')
     if any([await c.is_visible() for c in await joined.all()]):
         result['is_member'] = True
     elif any([await c.is_visible() for c in await join.all()]):
         result['is_member'] = False
-    heading = page.locator('h1')
+    heading = current_registry().all(page, 'heading')
     if not any([await h.is_visible() for h in await heading.all()]):
         result.update(code='GROUP_PAGE_UNCONFIRMED', details='Chưa xác minh được trang Group; vui lòng kiểm tra lại.')
         return result

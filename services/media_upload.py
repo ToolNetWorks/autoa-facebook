@@ -4,11 +4,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any, Sequence
-from services.facebook_selectors import SelectorRegistry, active_composer_dialog
+from services.facebook_selectors import current_registry, active_composer_dialog
 
 
 async def attachment_ready(dialog: Any) -> bool:
-    registry = SelectorRegistry()
+    registry = current_registry()
     previews = registry.locators(dialog, 'preview')[0]
     count = 0
     for image in await previews.all():
@@ -18,7 +18,7 @@ async def attachment_ready(dialog: Any) -> bool:
     # is also explicit evidence of an attachment, unlike a profile avatar.
     removals = registry.locators(dialog, 'remove_photo')[0]
     remove_count = sum([await item.is_visible() for item in await removals.all()])
-    progress = dialog.locator('[role="progressbar"], [aria-busy="true"]')
+    progress = registry.all(dialog, 'progress')
     busy = any([await item.is_visible() for item in await progress.all()])
     return max(count, remove_count) == 1 and not busy
 
@@ -34,7 +34,7 @@ async def upload_media(page: Any, media_paths: Sequence[str | Path],
         return False
     if await attachment_ready(dialog):
         return False  # refuse to add to an existing attachment
-    registry = SelectorRegistry()
+    registry = current_registry()
     file_input = await registry.resolve(dialog, 'file_input', visible=False, timeout=200)
     if file_input is not None:
         # Playwright supports hidden inputs; visibility is not required here.

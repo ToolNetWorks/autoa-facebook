@@ -4,12 +4,14 @@ No CAPTCHA bypass, fingerprint spoofing, credential extraction or auto-retries.
 Facebook DOM changes often; every attempted submission is unverified until checked.
 """
 from __future__ import annotations
+from services.facebook_selectors import current_registry, selector_workflow
 
 import asyncio
 import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -219,6 +221,7 @@ async def facebook_identity(page, uid: str) -> tuple[str, str]:
     return name, avatar
 
 
+@selector_workflow
 async def check_session(account_id: int) -> dict:
     """Report whether this account's stored browser profile is still usable.
 
@@ -251,53 +254,18 @@ async def check_session(account_id: int) -> dict:
     return outcome
 
 
-ANONYMOUS_RE = re.compile(r"Post anonymously|Anonymous post|Anonymous member|Anonymous participant|Đăng ẩn danh|Bài viết ẩn danh|Thành viên ẩn danh|Người tham gia ẩn danh", re.I)
 
 
 #: Facebook shows an information dialog when the anonymous identity is turned
 #: on. It has to be closed before the identity of the composer can be read.
-ANONYMOUS_NOTICE_RE = re.compile(r"^(Bài viết ẩn danh|Post anonymously)$", re.I)
-ANONYMOUS_NOTICE_OK_RE = re.compile(r"^(OK|Đồng ý|Got it|Đã hiểu|Tôi hiểu)$", re.I)
 #: The identity a composer shows when the post goes out anonymously. Only the
 #: author badge counts: the label "Bài viết ẩn danh" also appears on a
 #: control that is present while the account is still posting under its real
 #: name, so it is not proof of anything.
-ANONYMOUS_IDENTITY_RE = re.compile(
-    r"^(Anonymous member|Anonymous participant|Thành viên ẩn danh|Người tham gia ẩn danh)$", re.I)
 
 
-async def dismiss_anonymous_notice(page) -> bool:
-    """Đóng hộp thoại giải thích về bài viết ẩn danh nếu nó đang mở.
-
-    Facebook mở hộp thoại này ngay khi bật chế độ ẩn danh. Hộp thoại nằm
-    bên trong composer nên không phải lúc nào nó cũng là hộp thoại cuối cùng,
-    vì vậy mọi hộp thoại đều được dò.
-    """
-    try:
-        dialogs = await page.get_by_role("dialog").all()
-    except Exception:
-        return False
-    for dialog in dialogs:
-        try:
-            title = dialog.get_by_text(ANONYMOUS_NOTICE_RE)
-            if not await title.count() or not await title.first.is_visible():
-                continue
-            button = await first_visible(page, [
-                dialog.get_by_role("button", name=ANONYMOUS_NOTICE_OK_RE),
-            ], timeout=1500)
-            if button is None:
-                button = await first_visible(page, [
-                    page.get_by_role("button", name=ANONYMOUS_NOTICE_OK_RE),
-                ], timeout=1500)
-            if button is None:
-                continue
-            if not await click_element(button, timeout=5000):
-                continue
-            await page.wait_for_timeout(800)
-            return True
-        except Exception:
-            continue
-    return False
+async def dismiss_anonymous_notice(page):
+    return await posting_identity.dismiss_anonymous_notice(page)
 
 
 async def click_element(element, timeout: int = 10000) -> bool:
@@ -318,96 +286,24 @@ async def click_element(element, timeout: int = 10000) -> bool:
         return False
 
 
-async def anonymous_mode_verified(page) -> bool:
-    """Strictly verify a checked toggle or an active anonymous composer identity."""
-    for locator in [page.get_by_role("switch", name=ANONYMOUS_RE),
-                     page.get_by_role("checkbox", name=ANONYMOUS_RE)]:
-        try:
-            if await locator.count() and await locator.first.is_visible():
-                if await locator.first.get_attribute("aria-checked") == "true":
-                    return True
-                if await locator.first.is_checked():
-                    return True
-        except Exception:
-            pass
-    # An information dialog headed "Post anonymously" is not proof the
-    # author identity has changed. Only accept a checked control or an
-    # explicit anonymous AUTHOR badge in the active composer.
-    try:
-        dialog = page.get_by_role("dialog").last
-        identity = dialog.get_by_text(ANONYMOUS_IDENTITY_RE)
-        if await identity.count() and await identity.first.is_visible():
-            return True
-    except Exception:
-        pass
-    return False
+async def anonymous_mode_verified(page):
+    return await posting_identity.anonymous_mode_verified(page)
 
 
-async def require_anonymous_mode(page) -> bool:
-    await dismiss_anonymous_notice(page)
-    if await anonymous_mode_verified(page):
-        return True
-    for locator in [page.get_by_role("switch", name=ANONYMOUS_RE),
-                     page.get_by_role("checkbox", name=ANONYMOUS_RE)]:
-        try:
-            if await locator.count() and await locator.first.is_visible():
-                await click_element(locator.first, timeout=5000)
-                break
-        except Exception:
-            pass
-    else:
-        # Some Facebook UIs expose a text button instead of a switch.
-        # Never trust the click alone: verify the resulting composer separately.
-        control = await first_visible(page, [
-            page.get_by_role("button", name=ANONYMOUS_RE),
-            page.get_by_text(re.compile(r"^Post anonymously$|^Đăng ẩn danh$", re.I)),
-        ], timeout=1000)
-        if control is None:
-            return False
-        await click_element(control, timeout=5000)
-    # Bật chế độ ẩn danh sẽ mở hộp thoại giải thích; đóng nó trước khi
-    # đọc danh tính của composer.
-    await page.wait_for_timeout(600)
-    await dismiss_anonymous_notice(page)
-    okay = await first_visible(page, [
-        page.get_by_role("button", name=re.compile(r"^(Got it|Đã hiểu|Tôi hiểu)$", re.I)),
-    ], timeout=1000)
-    if okay:
-        await click_element(okay, timeout=5000)
-    await page.wait_for_timeout(800)
-    await dismiss_anonymous_notice(page)
-    return await anonymous_mode_verified(page)
+async def require_anonymous_mode(page):
+    return await posting_identity.require_anonymous_mode(page)
 
 
 #: Nút thêm ảnh hoặc video trong composer. Facebook tiếng Việt dùng nhãn
 #: "Đính kèm một ảnh hoặc video", tiếng Anh dùng "Attach a photo or video".
 #: Nhãn của nút thêm ảnh. Dấu "/" không dùng được trong biểu thức chọn
 #: của Playwright, nên nhãn tiếng Việt được tra bằng bộ chọn thuộc tính.
-PHOTO_BUTTON_LABELS = ("Ảnh/video", "Ảnh / Video", "Photo/video", "Photos/videos", "Ảnh")
 
 #: Nút đăng bài. Facebook dùng cả thẻ ``button`` lẫn ``div`` có
 #: ``role="button"``, nhãn nằm trong một ``span`` đơn giản, và khi đăng ẩn danh
 #: nút lại là **Gửi** chứ không phải **Đăng**. Các lựa chọn đặt từ cụ thể nhất
 #: đến rộng nhất.
-SUBMIT_BUTTON_RE = re.compile(r"^(Post|Đăng|Đăng bài|Gửi|Send)$", re.I)
-SUBMIT_BUTTON_SELECTORS = (
-    "span:text-is('Đăng')",
-    "span:text-is('Post')",
-    "span:text-is('Gửi')",
-    "span:text-is('Send')",
-    "span:text-is('Đăng bài')",
-    "div[aria-label='Đăng']",
-    "div[aria-label='Post']",
-    "div[aria-label='Gửi']",
-    "div[aria-label='Send']",
-    "div[role='button']:has-text('Đăng')",
-    "div[role='button']:has-text('Post')",
-)
-PHOTO_BUTTON_RE = re.compile(r"^(Photo|Photos)", re.I)
 #: Nút tải ảnh lên máy, một số giao diện dùng nhãn này thay cho nút trên.
-PHOTO_UPLOAD_RE = re.compile(
-    r"Đính kèm một ảnh hoặc video|Attach a photo or video|"
-    r"Chọn ảnh|Upload photos?|Chọn từ máy tính", re.I)
 
 GROUP_JOIN_RE = re.compile(r"^(Join Group|Tham gia nhóm|Tham gia)$", re.I)
 #: Notices that Facebook shows after a join request was sent.
@@ -425,8 +321,6 @@ GROUP_JOIN_QUESTION_RE = re.compile(
 GROUP_COMPOSER_RE = re.compile(r"Write something|Viết gì đó|Bạn viết gì|Hãy viết gì đó|Viết bài", re.I)
 GROUP_PENDING_RE = re.compile(r"pending approval|awaiting approval|chờ duyệt|chờ phê duyệt|"
                               r"đang chờ.*duyệt|your post.*review", re.I)
-IDENTITY_CONTROL_RE = re.compile(r"Chỉnh sửa hồ sơ|Đổi danh tính|Đăng.*với tư cách|Edit profile|"
-                                 r"Post as|Use another identity|Đăng như", re.I)
 GROUP_NO_ACCESS_RE = re.compile(
     r"không xem được nội dung này|không thể xem nội dung này|nội dung này không khả dụng|"
     r"chỉ chia sẻ nội dung với một nhóm nhỏ|"
@@ -442,92 +336,27 @@ GROUP_CANNOT_POST_RE = re.compile(
     r"posting.{0,3}s been turned off|you.{0,3}re not allowed to post", re.I)
 
 
-def same_identity(left: str, right: str) -> bool:
-    """Compare two identity labels without case and spacing differences."""
-    normalise = lambda value: re.sub(r"\s+", " ", (value or "").strip()).casefold()
-    return normalise(left) == normalise(right)
+def same_identity(left, right):
+    return posting_identity.same_identity(left, right)
 
 
-async def anonymous_mode_available(page) -> bool | None:
-    """True when the composer offers the anonymous identity.
-
-    ``None`` means the identity control could not be read at all, which is
-    not the same as the identity being unavailable.
-    """
-    for locator in [page.get_by_role("switch", name=ANONYMOUS_RE),
-                    page.get_by_role("checkbox", name=ANONYMOUS_RE),
-                    page.get_by_role("button", name=ANONYMOUS_RE)]:
-        try:
-            if await locator.count() and await locator.first.is_visible():
-                return True
-        except Exception:
-            continue
-    return None
+async def anonymous_mode_available(page):
+    return await posting_identity.anonymous_mode_available(page)
 
 
 async def open_identity_menu(page):
-    """Open the identity control of the composer. Never creates an identity."""
-    dialog = page.get_by_role("dialog").last
-    control = await first_visible(page, [
-        dialog.get_by_role("button", name=IDENTITY_CONTROL_RE),
-        page.get_by_role("button", name=IDENTITY_CONTROL_RE),
-        dialog.locator('[aria-label*="tư cách" i], [aria-label*="identity" i], '
-                       '[aria-label*="hồ sơ" i], [aria-label*="profile" i]'),
-    ], timeout=1500)
-    if control is None:
-        return None
-    try:
-        await control.click(timeout=5000)
-        await page.wait_for_timeout(1200)
-    except Exception:
-        return None
-    menu = page.get_by_role("menu").last
-    if await menu.count():
-        return menu
-    return None
+    return await posting_identity.open_identity_menu(page)
 
 
-async def identity_names(menu) -> list[str]:
-    """The identities Facebook offers in the open menu."""
-    names: list[str] = []
-    try:
-        for item in await menu.get_by_role("menuitem").all():
-            try:
-                text = (await item.inner_text()).strip()
-                if text:
-                    names.append(text)
-            except Exception:
-                continue
-        if not names:
-            for item in await menu.locator("li, [role=option]").all():
-                try:
-                    text = (await item.inner_text()).strip()
-                    if text:
-                        names.append(text)
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return [name for name in names if name]
+async def identity_names(menu):
+    return await posting_identity.identity_names(menu)
 
 
-async def identity_shown(page, wanted: str) -> bool:
-    """True when the composer shows the expected identity."""
-    dialog = page.get_by_role("dialog").last
-    for locator in [dialog.locator(f'[aria-label*="{wanted}" i]'),
-                    page.locator(f'[aria-label*="{wanted}" i]')]:
-        try:
-            if await locator.count():
-                return True
-        except Exception:
-            continue
-    try:
-        text = await dialog.inner_text(timeout=5000)
-        return wanted.casefold() in text.casefold()
-    except Exception:
-        return False
+async def identity_shown(page, wanted):
+    return await posting_identity.identity_shown(page, wanted)
 
 
+@selector_workflow
 async def check_group(data: dict) -> dict:
     """Check what Facebook allows this account to do in a group.
 
@@ -849,6 +678,7 @@ async def active_composer_dialog(page):
     return await registry_composer_dialog(page)
 
 
+@selector_workflow
 async def attempt_post(data: dict):
     try:
         pipeline_id, account_id, job_id, group_id = (
@@ -894,7 +724,7 @@ async def attempt_post(data: dict):
             diagnostic_path.chmod(0o600)
             if access["code"] != "ACCESSIBLE":
                 await page.screenshot(path=str(evidence_path), timeout=10000,
-                                      mask=[page.locator('input[name="email"],input[name="pass"],input[type="password"]')])
+                                      mask=[current_registry().all(page, 'login_inputs')])
                 return result("needs_review", access["details"], evidence_name,
                               session_status=access["session_status"])
             expected = access["resolved_url"]
@@ -1021,25 +851,29 @@ async def attempt_post(data: dict):
                 return result("needs_review", observed_session["details"],
                               session_status=observed_session["status"])
             baseline_links = await group_post_links(page)
-            if data.get("dry_run"):
-                await page.screenshot(path=str(evidence_path), timeout=10000)
-                return result("needs_review", "Bản xem trước đã sẵn sàng; chưa gửi bài.", evidence_name,
-                              actual_identity, "draft_verified")
             identity_valid = (await posting_identity.identity_shown(page, actual_identity)
                               if mode == "nickname" else await posting_identity.anonymous_mode_verified(page))
             if not identity_valid:
                 return result("needs_review", "Danh tính đăng đã thay đổi; chưa gửi bài.")
+            if data.get("dry_run"):
+                await page.screenshot(path=str(evidence_path), timeout=10000)
+                return result("needs_review", "Bản xem trước đã sẵn sàng; chưa gửi bài.", evidence_name,
+                              actual_identity, "draft_verified")
             prior_notices = await visible_notices(page)
             outcome_task = asyncio.create_task(wait_post_outcome(page, final_caption, prior_notices=prior_notices))
             await asyncio.sleep(0)
+            submitted_at = time.time()
             was_clicked = True
             await submit.click(timeout=15000)  # one attempt, including dispatch timeout
             # Quan sát kết quả thật. Không có kết luận nào được rút ra từ
             # việc đã bấm nút. Không tự retry sau khi nhấn Đăng.
             outcome = await outcome_task
             permalink = await newest_permalink(page, final_caption, expected_group=expected,
-                                               exclude=baseline_links)
+                                               exclude=baseline_links, expected_image=media[0],
+                                               submitted_at=submitted_at, expected_identity=actual_identity)
             await page.screenshot(path=str(evidence_path), full_page=False, timeout=15000)
+            if not same_group(page.url, expected):
+                return result("submitted_unverified", "Đích Facebook đã thay đổi; cần đối chiếu trước khi thử lại.", evidence_name)
             if permalink and "/pending_posts/" not in permalink and outcome["state"] not in ("pending_approval", "rejected"):
                 logger.emit("post_posted", job_id=job_id, identity=actual_identity,
                             permalink=permalink, run_id=run_id)
@@ -1093,6 +927,7 @@ async def attempt_post(data: dict):
                 pass
 
 
+@selector_workflow
 async def attempt_reel(data: dict):
     """Best-effort Facebook profile Reel via visible desktop UI, fail-closed.
 
@@ -1115,20 +950,14 @@ async def attempt_reel(data: dict):
             await page.wait_for_timeout(2000)
             if any(x in page.url for x in ("/login", "/checkpoint", "/two_step_verification")):
                 return result("failed", "Facebook account requires login/checkpoint")
-            create = await first_visible(page, [
-                page.get_by_role("button", name=re.compile(r"Create reel|Tạo thước phim|Tạo reel", re.I)),
-                page.get_by_role("link", name=re.compile(r"Create reel|Tạo thước phim|Tạo reel", re.I)),
-            ], timeout=2000)
+            create = await current_registry().resolve(page, 'reel_create', timeout=2000)
             if create is None:
                 return result("failed", "Reel creation control unavailable; do not upload as a normal profile post")
             await create.click(timeout=10000)
             await page.wait_for_timeout(1200)
-            if not ("reel" in page.url.lower() or await page.get_by_text(re.compile(r"Create reel|Tạo thước phim|Tạo reel", re.I)).count()):
+            if not ("reel" in page.url.lower() or await current_registry().all(page, 'reel_create').count()):
                 return result("failed", "Could not verify Reel composer; no post submitted")
-            add_video = await first_visible(page, [
-                page.get_by_role("button", name=re.compile(r"Add video|Thêm video|Chọn video|Upload video", re.I)),
-                page.get_by_text(re.compile(r"^Add video$|^Thêm video$|^Chọn video$", re.I)),
-            ], timeout=3000)
+            add_video = await current_registry().resolve(page, 'reel_upload', timeout=3000)
             if add_video is None:
                 return result("failed", "Reel video upload control unavailable")
             # Browser UI usually opens a file chooser. Do not upload to hidden
@@ -1140,15 +969,12 @@ async def attempt_reel(data: dict):
             await page.wait_for_timeout(5000)
             # Review steps; descriptions can be introduced after one or two Next clicks.
             for _ in range(3):
-                description = await first_visible(page, [
-                    page.get_by_role("textbox", name=re.compile(r"Describe your reel|Mô tả thước phim|Mô tả reel", re.I)),
-                    page.get_by_placeholder(re.compile(r"Describe your reel|Mô tả thước phim|Mô tả reel", re.I)),
-                ], timeout=1500)
+                description = await current_registry().resolve(page, 'reel_description', timeout=1500)
                 if description:
                     if data.get("body"):
                         await description.fill(str(data["body"])[:20000], timeout=10000)
                     break
-                next_button = await first_visible(page, [page.get_by_role("button", name=re.compile(r"^(Next|Tiếp|Tiếp theo)$", re.I))], timeout=1800)
+                next_button = await current_registry().resolve(page, 'reel_next', timeout=1800)
                 if not next_button:
                     return result("failed", "Reel preview/Next not available; no post submitted")
                 await next_button.click(timeout=12000)
@@ -1156,12 +982,10 @@ async def attempt_reel(data: dict):
             else:
                 return result("failed", "Reel description stage unavailable; no post submitted")
             # Require unmistakable Reel-specific form before clicking publish.
-            reel_context = await page.get_by_text(re.compile(r"Your reel|Describe your reel|Reel của bạn|Mô tả reel|thước phim",re.I)).count()
+            reel_context = await current_registry().all(page, 'reel_context').count()
             if reel_context == 0:
                 return result("failed", "Reel identity not confirmed at publish stage")
-            publish = await first_visible(page, [
-                page.get_by_role("button", name=re.compile(r"^(Publish|Publish reel|Đăng thước phim|Đăng reel)$", re.I)),
-            ], timeout=2000)
+            publish = await current_registry().resolve(page, 'reel_publish', timeout=2000)
             if publish is None or not await publish.is_enabled():
                 return result("failed", "Reel publish control disabled or absent")
             was_clicked = True
@@ -1170,7 +994,7 @@ async def attempt_reel(data: dict):
             await page.screenshot(path=str(evidence_path), full_page=False, timeout=15000)
             return result("submitted_unverified", "Reel publish clicked; confirm video exists on personal profile", evidence_name)
     except Exception as error:
-        state = "needs_review" if was_clicked else "failed"
+        state = "submitted_unverified" if was_clicked else "failed"
         if context:
             try:
                 if context.pages:
@@ -1279,30 +1103,19 @@ def engagement_result(counters: dict, status: str, error_code: str = ""):
 
 
 async def dismiss_common_popups(page) -> bool:
-    """Đóng các hộp thoại phủ lên composer: cookie, quảng cáo, thông báo.
-
-    Hộp thoại này chắn thao tác chuột, khiến nút bấm bị báo lỗi dù đã tìm
-    thấy đúng phần tử.
-    """
-    candidates = [
-        "div[aria-label='Đóng']",
-        "div[aria-label='Close']",
-        "div[role='button']:has-text('Để sau')",
-        "div[role='button']:has-text('Not now')",
-        "div[role='button']:has-text('Bỏ qua')",
-        "div[role='button']:has-text('Skip')",
-    ]
-    closed = False
-    for selector in candidates:
-        try:
-            target = page.locator(selector).first
-            await target.wait_for(state="visible", timeout=400)
-            if await target.is_enabled():
-                if await click_element(target, timeout=1500):
-                    closed = True
-        except Exception:
+    """Dismiss at most one unambiguous information dialog outside a composer."""
+    registry = current_registry()
+    candidates = []
+    for dialog in await registry.all(page, 'dialogs').all():
+        if not await dialog.is_visible() or await registry.all(dialog, 'editable').count():
             continue
-    return closed
+        control = await registry.resolve(dialog, 'dismiss_popup', timeout=100)
+        if control is not None:
+            candidates.append(control)
+    if len(candidates) != 1:
+        return False
+    await candidates[0].click(timeout=1500)
+    return True
 
 
 async def describe_composer(page) -> str:
@@ -1365,6 +1178,7 @@ async def attempt_engagement(data: dict):
                 pass
 
 
+@selector_workflow
 async def _cli_check_composer(payload: dict) -> dict:
     """Kiểm tra xem ô soạn bài có sẵn trên nhóm hay không (dùng cho CLI debug)."""
     account_id = int(payload["account_id"])
@@ -1413,6 +1227,7 @@ async def _cli_check_composer(payload: dict) -> dict:
     return outcome
 
 
+@selector_workflow
 async def _cli_check_identity(payload: dict) -> dict:
     """Kiểm tra chế độ đăng ẩn danh / biệt danh có sẵn hay không (CLI debug)."""
     account_id = int(payload["account_id"])
@@ -1547,8 +1362,8 @@ def main():
         Path(sys.argv[3]).write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
         print(outcome.get("verification_status", "unavailable"))
         return
-    if len(sys.argv) != 4 or sys.argv[1] not in ("post", "reel", "check-composer", "check-identity", "dry-run"):
-        print("Usage: fb_browser.py login <account_id> | check|check-group|check-composer|check-identity|dry-run|post|reel|engagement <request.json> <result.json>", file=sys.stderr)
+    if len(sys.argv) != 4 or sys.argv[1] not in ("post", "reel", "check-composer", "check-identity", "dry-run", "preflight"):
+        print("Usage: fb_browser.py login <account_id> | check|check-group|check-composer|check-identity|dry-run|preflight|post|reel|engagement <request.json> <result.json>", file=sys.stderr)
         raise SystemExit(2)
     payload = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
     if sys.argv[1] == "check-composer":
@@ -1560,6 +1375,12 @@ def main():
         outcome = asyncio.run(_cli_check_identity(payload))
         Path(sys.argv[3]).write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
         print(outcome.get("status", "unknown"))
+        return
+    if sys.argv[1] == "preflight":
+        payload["dry_run"] = True  # Cannot be overridden by request data.
+        outcome = asyncio.run(attempt_post(payload))
+        Path(sys.argv[3]).write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
+        print(outcome["state"])
         return
     if sys.argv[1] == "dry-run":
         outcome = _cli_dry_run(payload)
