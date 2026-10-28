@@ -4,3 +4,5 @@ pydantic>=2.7,<3
 python-multipart>=0.0.9,<1
 playwright>=1.49,<2
 argon2-cffi>=23.1,<26
+Pillow>=13,<14
+boto3>=1.43,<2

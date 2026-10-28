@@ -4,6 +4,9 @@ Preparation only. No command in this document is authorization to deploy, migrat
 change CTV assignments, start a browser on a production profile, or submit a post.
 A GitHub PR is for review; it is not a production deployment.
 
+Update 2026-10-28: the operator separately authorized merging V20/V21 source into
+main. That authorization does not approve any production action in this runbook.
+
 ## Gate before approval
 
 1. Review the exact integration commit, NOTICE/provenance and validation results.
@@ -12,10 +15,10 @@ A GitHub PR is for review; it is not a production deployment.
 2. Run `python scripts/check_group_release.py --database PATH` read-only. The current
    V19 schema supports the runtime, but active membership conflicts block this
    release. V20 is never invoked by application startup.
-3. The owner must choose the retained CTV. Preserve both users and all resources;
-   suspension/revocation of the other assignment, if selected, requires a separate
-   authorized transaction with before/after audit. Do not infer ownership from a
-   lower user ID, uploader, or NULL owner fields. Do not move Facebook profiles.
+3. The owner already selected CTV867; a separately approved transaction suspended
+   hiu9h's Pipeline 1 membership and assigned Account 1 to User 3. Fresh read-only
+   audit confirms this state. Verify it before deployment; do not repeat the
+   transfer or change other assignments. Preserve both users, history and profiles.
 4. Review historical attribution where a source Post ID was used as a Job ID.
    The source fix protects future writes and refuses conflicting rows; it does not
    repair old production data. A targeted repair must identify execution/tenant/
@@ -82,8 +85,9 @@ A GitHub PR is for review; it is not a production deployment.
 
 ## Known release blockers
 
-- Conflicting active CTV assignments still require an owner decision and approved
-  V20 maintenance. Deploying the new auth guard first would deny both sessions.
+- The prior Pipeline 1 ownership conflict is resolved; current read-only audit
+  confirms one active CTV. V20 constraints still need separately approved
+  maintenance. Stop if a new conflict appears; never auto-select an owner.
 - Historical attribution requires a reviewed repair, not an automatic migration.
 - Production Dashboard after operator login and new live Facebook preflight are not
   verified by local tests. Nickname and post-submit verification require live evidence.

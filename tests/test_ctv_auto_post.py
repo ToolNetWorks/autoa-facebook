@@ -1,10 +1,7 @@
-"""V11: mỗi CTV tự thiết lập tự động đăng group của riêng mình.
+"""Legacy configuration regression under 1 Pipeline = 1 active CTV.
 
-Bộ kiểm thử này đi đúng mười lăm kịch bản bắt buộc: quản trị tạo Workspace và
-cấp thông tin đăng nhập, CTV đăng nhập lần đầu và thấy ngay một form đầy đủ,
-lưu cấu hình riêng, hai CTV không lẫn cấu hình của nhau, quản trị xem và tạm
-dừng được từng cấu hình, và các quy tắc an toàn giữa nhiều CTV trên cùng một
-Facebook.
+Separate collaborators use separate Workspaces. Historical reservations survive
+an explicitly simulated transfer without granting the previous owner access.
 """
 from test_app import AuthClient, client  # noqa: F401 (registers the client fixture)
 
@@ -80,6 +77,14 @@ def login_ctv(username, key, password=CTV_PASSWORD):
         'username': username, 'password': password, 'pipeline_key': key})
     ctv.csrf = response.json().get('csrf_token', '') if response.status_code == 200 else ''
     return ctv, response
+
+
+def separate_collaborator(admin, username):
+    pipeline = make_pipeline(admin, '@'+username)
+    uid = make_ctv(admin, pipeline, username)
+    session,response = login_ctv(username,new_pipeline_key(admin,pipeline))
+    assert response.status_code==200,response.text
+    return pipeline,uid,session
 
 
 def my_config(ctv, pipeline_id):
@@ -248,44 +253,40 @@ def test_a_workspace_has_one_configuration(client):
     """
     pipeline = make_pipeline(client, '@ctv_two')
     make_ctv(client, pipeline, 'ctv_first_of_two')
-    make_ctv(client, pipeline, 'ctv_second_of_two')
+    rejected=client.post('/api/admin/users',json={'username':'ctv_second_of_two','password':CTV_PASSWORD,'pipeline_id':pipeline})
+    assert rejected.status_code==409
+    assert rejected.json()['detail']['code']=='PIPELINE_MEMBERSHIP_CONFLICT'
     key = new_pipeline_key(client, pipeline)
 
     one, _ = login_ctv('ctv_first_of_two', key)
-    two, _ = login_ctv('ctv_second_of_two', key)
     save_config(one, pipeline, topic='chủ đề A', max_posts_per_account_daily=3)
-    save_config(two, pipeline, topic='chủ đề B', max_posts_per_account_daily=2)
+    save_config(one, pipeline, topic='chủ đề B', max_posts_per_account_daily=2)
 
     config_one = my_config(one, pipeline).json()
-    config_two = my_config(two, pipeline).json()
     assert config_one['settings']['topic'] == 'chủ đề B'
-    assert config_two['settings']['topic'] == 'chủ đề B'
     assert config_one['settings']['max_posts_per_account_daily'] == 2
-    assert config_two['settings']['max_posts_per_account_daily'] == 2
+    with m.db() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM ctv_auto_post_settings WHERE pipeline_id=?',(pipeline,)).fetchone()[0]==1
     one.close()
-    two.close()
 
 
 def test_a_workspace_without_a_configuration_starts_from_the_defaults(client):
     """Chưa ai lưu thì giao diện mở ra vẫn là form mặc định."""
     pipeline = make_pipeline(client, '@ctv_default')
     make_ctv(client, pipeline, 'ctv_with_config')
-    make_ctv(client, pipeline, 'ctv_without_config')
     key = new_pipeline_key(client, pipeline)
 
     one, _ = login_ctv('ctv_with_config', key)
-    two, _ = login_ctv('ctv_without_config', key)
-    body = my_config(two, pipeline).json()
+    body = my_config(one, pipeline).json()
     assert body['configured'] is False
     assert body['settings']['topic'] == ''
     assert body['settings']['enabled'] is False
     # Lưu lần đầu thì Workspace có cấu hình.
     save_config(one, pipeline, topic='cấu hình của Workspace')
-    body = my_config(two, pipeline).json()
+    body = my_config(one, pipeline).json()
     assert body['configured'] is True
     assert body['settings']['topic'] == 'cấu hình của Workspace'
     one.close()
-    two.close()
 
 
 # --- 9. CTV A không sửa được cấu hình của CTV B -----------------------------
@@ -293,18 +294,17 @@ def test_a_workspace_without_a_configuration_starts_from_the_defaults(client):
 def test_collaborator_cannot_touch_another_configuration(client):
     pipeline = make_pipeline(client, '@ctv_tamper')
     make_ctv(client, pipeline, 'ctv_tamper_a')
-    second = make_ctv(client, pipeline, 'ctv_tamper_b')
+    other,second,two = separate_collaborator(client,'ctv_tamper_b')
     key = new_pipeline_key(client, pipeline)
     one, _ = login_ctv('ctv_tamper_a', key)
-    two, _ = login_ctv('ctv_tamper_b', key)
-    save_config(two, pipeline, topic='của B')
+    save_config(two, other, topic='của B')
 
-    assert one.put(f'/api/pipelines/{pipeline}/auto-post/ctv-configs/{second}',
+    assert one.put(f'/api/pipelines/{other}/auto-post/ctv-configs/{second}',
                     json={'topic': 'đã bị sửa'}).status_code == 403
-    assert one.get(f'/api/pipelines/{pipeline}/auto-post/ctv-configs/{second}').status_code == 403
-    assert one.post(f'/api/pipelines/{pipeline}/auto-post/ctv-configs/{second}/pause').status_code == 403
+    assert one.get(f'/api/pipelines/{other}/auto-post/ctv-configs/{second}').status_code == 403
+    assert one.post(f'/api/pipelines/{other}/auto-post/ctv-configs/{second}/pause').status_code == 403
     # Cấu hình của B không đổi.
-    assert my_config(two, pipeline).json()['settings']['topic'] == 'của B'
+    assert my_config(two, other).json()['settings']['topic'] == 'của B'
     one.close()
     two.close()
 
@@ -312,11 +312,10 @@ def test_collaborator_cannot_touch_another_configuration(client):
 def test_collaborator_cannot_send_another_owner_in_the_body(client):
     pipeline = make_pipeline(client, '@ctv_body')
     make_ctv(client, pipeline, 'ctv_body_a')
-    second = make_ctv(client, pipeline, 'ctv_body_b')
+    other,second,two = separate_collaborator(client,'ctv_body_b')
     key = new_pipeline_key(client, pipeline)
     one, _ = login_ctv('ctv_body_a', key)
-    two, _ = login_ctv('ctv_body_b', key)
-    save_config(two, pipeline, topic='của B')
+    save_config(two, other, topic='của B')
 
     response = one.put(f'/api/pipelines/{pipeline}/auto-post/my-config',
                        json={'topic': 'đã bị sửa', 'ctv_user_id': second})
@@ -326,6 +325,7 @@ def test_collaborator_cannot_send_another_owner_in_the_body(client):
     settings = my_config(one, pipeline).json()['settings']
     assert settings['topic'] == 'đã bị sửa'
     assert settings['ctv_user_id'] != second
+    assert my_config(two,other).json()['settings']['topic']=='của B'
     one.close()
     two.close()
 
@@ -336,27 +336,27 @@ def test_admin_sees_and_pauses_the_workspace_configuration(client):
     """Admin quản lý được cấu hình của Workspace, và tạm dừng được nó."""
     pipeline = make_pipeline(client, '@ctv_admin')
     make_ctv(client, pipeline, 'ctv_admin_a')
-    second = make_ctv(client, pipeline, 'ctv_admin_b')
+    other,second,two = separate_collaborator(client,'ctv_admin_b')
     key = new_pipeline_key(client, pipeline)
     one, _ = login_ctv('ctv_admin_a', key)
-    two, _ = login_ctv('ctv_admin_b', key)
     save_config(one, pipeline, topic='A')
-    save_config(two, pipeline, topic='B')
+    save_config(two, other, topic='B')
 
     listing = client.get(f'/api/pipelines/{pipeline}/auto-post/ctv-configs')
     assert listing.status_code == 200
     rows = listing.json()['configs']
     assert len(rows) == 1
-    assert rows[0]['topic'] == 'B'
+    assert rows[0]['topic'] == 'A'
     assert rows[0]['enabled'] is True
 
-    assert client.get(f'/api/pipelines/{pipeline}/auto-post/ctv-configs/{second}').json()[
+    assert client.get(f'/api/pipelines/{other}/auto-post/ctv-configs/{second}').json()[
         'settings']['topic'] == 'B'
-    paused = client.post(f'/api/pipelines/{pipeline}/auto-post/ctv-configs/{second}/pause')
+    paused = client.post(f'/api/pipelines/{other}/auto-post/ctv-configs/{second}/pause')
     assert paused.status_code == 200
     assert paused.json()['settings']['enabled'] is False
     # Người trong Workspace nhìn thấy trạng thái bị tạm dừng.
-    assert my_config(two, pipeline).json()['settings']['enabled'] is False
+    assert my_config(two, other).json()['settings']['enabled'] is False
+    assert my_config(one,pipeline).json()['settings']['enabled'] is True
     one.close()
     two.close()
 
@@ -379,13 +379,14 @@ def test_two_collaborators_never_share_one_facebook_at_the_same_time(client):
     make_media(client, pipeline, 'a.jpg')
     make_media(client, pipeline, 'b.jpg')
     make_ctv(client, pipeline, 'ctv_shared_a')
-    make_ctv(client, pipeline, 'ctv_shared_b')
+    other,_,two = separate_collaborator(client,'ctv_shared_b')
     key = new_pipeline_key(client, pipeline)
 
     one, _ = login_ctv('ctv_shared_a', key)
-    two, _ = login_ctv('ctv_shared_b', key)
     save_config(one, pipeline, topic='A', max_posts_per_account_daily=3)
-    save_config(two, pipeline, topic='B', max_posts_per_account_daily=3)
+    response=save_config(two,other,account_scope='selected',selected_account_ids=[account])
+    assert response.status_code==404
+    assert two.get(f'/api/pipelines/{pipeline}/auto-post/my-jobs').status_code==404
 
     with m.db() as conn:
         outcome = ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
@@ -410,8 +411,6 @@ def test_second_collaborator_is_blocked_from_a_busy_facebook(client):
     make_media(client, pipeline, 'a.jpg')
     make_media(client, pipeline, 'b.jpg')
     first = make_ctv(client, pipeline, 'ctv_busy_a')
-    make_ctv(client, pipeline, 'ctv_busy_b')
-    key = new_pipeline_key(client, pipeline)
 
     with m.db() as conn:
         conn.execute("""INSERT INTO auto_post_jobs
@@ -420,6 +419,14 @@ def test_second_collaborator_is_blocked_from_a_busy_facebook(client):
                      (pipeline, account, 1, 1, m.iso(), m.iso()))
         conn.execute("UPDATE auto_post_jobs SET created_by_ctv_id=? WHERE idempotency_key='seed-key'",
                      (first,))
+        # Isolated legacy transfer fixture: retain the old reservation, remove
+        # only the old membership, then assign exactly one current collaborator.
+        conn.execute("UPDATE pipeline_memberships SET status='suspended' WHERE pipeline_id=? AND user_id=?",(pipeline,first))
+    make_ctv(client,pipeline,'ctv_busy_b')
+    key=new_pipeline_key(client,pipeline)
+    previous,denied=login_ctv('ctv_busy_a',key)
+    assert denied.status_code!=200
+    previous.close()
 
     one, _ = login_ctv('ctv_busy_b', key)
     save_config(one, pipeline, topic='B')
@@ -439,7 +446,6 @@ def test_account_daily_limit_counts_every_collaborator(client):
     make_media(client, pipeline, 'a.jpg')
     make_media(client, pipeline, 'b.jpg')
     make_ctv(client, pipeline, 'ctv_limit_a')
-    make_ctv(client, pipeline, 'ctv_limit_b')
     key = new_pipeline_key(client, pipeline)
 
     # Quản trị giới hạn chung: 2 bài/ngày cho Facebook này.
@@ -447,17 +453,14 @@ def test_account_daily_limit_counts_every_collaborator(client):
                json={'daily_limit': 2})
 
     one, _ = login_ctv('ctv_limit_a', key)
-    two, _ = login_ctv('ctv_limit_b', key)
     save_config(one, pipeline, topic='A', max_posts_per_account_daily=5)
-    save_config(two, pipeline, topic='B', max_posts_per_account_daily=5)
 
     with m.db() as conn:
-        ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
+        outcome=ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
         used = conn.execute("""SELECT COALESCE(SUM(published+reserved),0) FROM posting_counters
                                 WHERE account_id=?""", (account,)).fetchone()[0]
-    assert used <= 2, "Hạn mức chung của Facebook không được vượt quá"
+    assert outcome['created'] and 0<used<=2, "Hạn mức chung của Facebook không được vượt quá"
     one.close()
-    two.close()
 
 
 def test_collaborator_limit_never_goes_above_the_shared_limit(client):
@@ -525,17 +528,19 @@ def test_two_collaborators_never_target_the_same_group(client):
     make_media(client, pipeline, 'a.jpg')
     make_media(client, pipeline, 'b.jpg')
     make_ctv(client, pipeline, 'ctv_group_a')
-    make_ctv(client, pipeline, 'ctv_group_b')
+    other,_,two = separate_collaborator(client,'ctv_group_b')
     key = new_pipeline_key(client, pipeline)
     one, _ = login_ctv('ctv_group_a', key)
-    two, _ = login_ctv('ctv_group_b', key)
     save_config(one, pipeline, topic='A', max_posts_per_account_daily=3)
-    save_config(two, pipeline, topic='B', max_posts_per_account_daily=3)
+    with m.db() as conn:
+        target=conn.execute('SELECT id FROM groups WHERE pipeline_id=?',(pipeline,)).fetchone()[0]
+    assert save_config(two,other,selected_group_ids=[target]).status_code==404
 
     with m.db() as conn:
         ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
         rows = conn.execute("""SELECT group_id, created_by_ctv_id FROM auto_post_jobs
                                 WHERE pipeline_id=?""", (pipeline,)).fetchall()
+    assert rows
     owners = {}
     for row in rows:
         owners.setdefault(row['group_id'], set()).add(row['created_by_ctv_id'])
@@ -566,16 +571,22 @@ def test_collaborator_only_sees_its_own_jobs(client):
     make_group(client, pipeline, account, 'Group A', 'https://www.facebook.com/groups/121212/')
     make_media(client, pipeline, 'a.jpg')
     first = make_ctv(client, pipeline, 'ctv_jobs_a')
-    second = make_ctv(client, pipeline, 'ctv_jobs_b')
+    other,second,two = separate_collaborator(client,'ctv_jobs_b')
+    second_account=make_account(client,other,'Facebook B')
+    make_group(client,other,second_account,'Group B','https://www.facebook.com/groups/343434/')
+    make_media(client,other,'b.jpg')
     key = new_pipeline_key(client, pipeline)
     one, _ = login_ctv('ctv_jobs_a', key)
-    two, _ = login_ctv('ctv_jobs_b', key)
     save_config(one, pipeline, topic='A')
-    save_config(two, pipeline, topic='B')
+    save_config(two, other, topic='B')
     with m.db() as conn:
         ctv_allocator.allocate(conn, pipeline, moment=inside_window(), max_jobs=20)
+        ctv_allocator.allocate(conn, other, moment=inside_window(), max_jobs=20)
     jobs_one = one.get(f'/api/pipelines/{pipeline}/auto-post/my-jobs').json()['jobs']
-    jobs_two = two.get(f'/api/pipelines/{pipeline}/auto-post/my-jobs').json()['jobs']
+    jobs_two = two.get(f'/api/pipelines/{other}/auto-post/my-jobs').json()['jobs']
+    assert jobs_one and jobs_two
+    assert one.get(f'/api/pipelines/{other}/auto-post/my-jobs').status_code==404
+    assert two.get(f'/api/pipelines/{pipeline}/auto-post/my-jobs').status_code==404
     assert all(job['created_by_ctv_id'] == first for job in jobs_one)
     assert all(job['created_by_ctv_id'] == second for job in jobs_two)
     one.close()

@@ -1,5 +1,35 @@
 # Integration candidate validation — 2026-10-27
 
+## Superseding final audit — 2026-10-28
+
+The operator has now authorized source merge of PR #1 and PR #2, with production
+deployment/migrations/session changes/Facebook publication explicitly excluded.
+The full V20 suite was run, rather than only the earlier selected module set:
+**603 passed, zero failures/errors/skips, 472.82s**. Evidence stays private in
+`/tmp/toolnet-final-audit/v20-full.xml` and `.log`. The 115 additional legacy cases
+also passed separately; they are a subset, not additional unique cases.
+
+The first full audit found ten outdated tests constructing two active CTVs in one
+Pipeline. They now verify separate-Workspace isolation, rejection of a second
+active assignment, and preserved old reservations after a simulated fixture-only
+transfer. The 1:1 guard was not relaxed; no tests were skipped or removed.
+Pillow and boto3, already imported by the application/verifier but absent from
+requirements, are now declared using the tested major/minor ranges. An offline
+pip dry-run found them satisfied; no packages were installed on production.
+
+Fresh read-only production verification supersedes the historical conflict note
+below: Pipeline 1 has CTV867 (User 3) as its only active CTV, hiu9h's membership is
+suspended, and Account 1 owner is User 3. Schema is V19. A WAL-safe backup into a
+private temporary path was migrated V19→V20→V21 twice: all 52 legacy tables retain
+their rows (apart from the version ledger), ownership is unchanged, integrity/FKs
+pass, and transaction rollback restores the original schema and rows. Production
+was opened read-only and no migration was applied there.
+
+GitHub audit found zero Actions workflows, repository webhooks, deployments and
+environments. Server cron/systemd inspection found no Git update/deploy hook or
+autoreload. Source merge does not run `deploy-ui.sh`; that script is an explicit
+maintenance action and remains outside the approved scope.
+
 ## Executed checks
 
 | Check | Result | Scope |
