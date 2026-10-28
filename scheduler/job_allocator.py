@@ -311,6 +311,10 @@ def allocate(conn, pipeline_id: int, moment: datetime | None = None,
     thêm job trùng. Việc ghi job, giữ chỗ và ghi lịch sử nằm trong cùng một
     giao dịch.
     """
+    from services.auto_posting_cycles import repository as cycles
+    if cycles.available(conn) and cycles.config(conn,pipeline_id):
+        return {'created':[],'skipped':['Workspace đang dùng cấu hình chu kỳ chung.'],
+                'day':'','planned':0,'already':0,'reason_code':'CYCLE_CONFIG_ACTIVE'}
     schedule = schedule_of(conn, pipeline_id)
     moment = moment or time_windows.now_in(schedule["timezone"])
     day = moment.strftime("%Y-%m-%d")

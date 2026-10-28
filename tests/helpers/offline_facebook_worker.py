@@ -26,7 +26,9 @@ async def run(payload):
         browser=await pw.chromium.launch(headless=True,args=['--no-sandbox'])
         context=await browser.new_context()
         if outcome!='expired_session':
-            await context.add_cookies([{'name':'c_user','value':'123','domain':'.facebook.com','path':'/'}])
+            await context.add_cookies([{'name':'c_user','value':os.environ.get('OFFLINE_FACEBOOK_UID','123'),'domain':'.facebook.com','path':'/'}])
+        if outcome=='anonymous_unavailable':
+            html=html.replace('Anonymous member','Fixture real identity').replace('aria-checked="true"','aria-checked="false"')
         intercepted=[]
         async def local_only(route):
             intercepted.append(route.request.url)

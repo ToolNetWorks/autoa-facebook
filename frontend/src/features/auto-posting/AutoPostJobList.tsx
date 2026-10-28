@@ -125,6 +125,7 @@ export function AutoPostJobList({
     { id: 'needs_review', label: 'Cần xem lại', count: counts.needs_review ?? 0 },
     { id: 'posted', label: 'Đã đăng', count: counts.posted ?? 0 },
     { id: 'failed', label: 'Thất bại', count: counts.failed ?? 0 },
+    { id: 'skipped', label: 'Bỏ qua', count: counts.skipped ?? 0 },
   ];
 
   return (

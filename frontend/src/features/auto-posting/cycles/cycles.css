@@ -1,0 +1,23 @@
+.cycle-workspace { min-width: 0; }
+.cycle-form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; padding-top: 12px; }
+.cycle-form-grid fieldset { min-width: 0; border: 1px solid var(--border,#dce2eb); border-radius: 8px; padding: 12px; }
+.cycle-check { display: flex; align-items: center; gap: 8px; padding: 6px 0; overflow-wrap: anywhere; }
+.cycle-check input { flex: 0 0 auto; width: 18px; height: 18px; }
+.cycle-check img { border-radius: 6px; object-fit: cover; }
+.cycle-days,.cycle-actions,.cycle-overview { display: flex; flex-wrap: wrap; gap: 12px; }
+.cycle-overview span { font-size: 13px; padding: 4px 0; }
+.cycle-media { max-height: 280px; overflow-y: auto; }
+.cycle-summary { display: grid; grid-template-columns: repeat(auto-fit,minmax(120px,1fr)); gap: 12px; margin: 0; }
+.cycle-summary dt { font-size: 12px; color: var(--muted,#667085); }
+.cycle-summary dd { font-size: 20px; font-weight: 600; margin: 2px 0; }
+.cycle-report-row { border-top: 1px solid var(--border,#dce2eb); padding-top: 12px; }
+.cycle-report-row summary { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 8px; cursor: pointer; min-height: 44px; }
+.cycle-report-row a,.cycle-report-row p { overflow-wrap: anywhere; }
+.cycle-caption { white-space: pre-wrap; overflow-wrap: anywhere; }
+.cycle-report-image { width: 120px; max-width: 100%; height: 100px; object-fit: contain; }
+@media (max-width: 600px) {
+  .cycle-workspace > .tabs { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); overflow: visible; }
+  .cycle-workspace > .tabs .tab { min-height: 44px; padding-inline: 8px; }
+  .cycle-form-grid { grid-template-columns: minmax(0,1fr); }
+  .cycle-actions .btn { min-height: 44px; }
+}

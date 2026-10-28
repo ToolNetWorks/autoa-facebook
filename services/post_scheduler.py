@@ -175,6 +175,10 @@ def pair_decisions(conn, pipeline_id: int, groups: list[dict]) -> dict:
 def plan(conn, pipeline_id: int, moment: datetime | None = None,
          provider_config=None) -> dict:
     """What the scheduler would do right now, without creating anything."""
+    from services.auto_posting_cycles import repository as cycles
+    if cycles.available(conn) and cycles.config(conn,pipeline_id):
+        return {'enabled':False,'jobs':[],'accounts':[],'groups':[],
+                'notes':['Workspace đang dùng cấu hình chu kỳ chung.'],'reason_code':'CYCLE_CONFIG_ACTIVE'}
     settings = posting_limits.settings_of(conn, pipeline_id)
     if not settings["enabled"]:
         return {"enabled": False, "reason": "Tự động đăng group đang tắt", "jobs": [],

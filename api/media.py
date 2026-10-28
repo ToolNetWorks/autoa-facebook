@@ -265,6 +265,10 @@ def build_router(deps: Deps) -> APIRouter:
             row = _album_row(deps, conn, workspace, media_id)
             used = conn.execute("""SELECT COUNT(*) FROM auto_post_jobs WHERE media_id=? AND status IN
                                    ('pending','approved','queued')""", (media_id,)).fetchone()[0]
+            from services.auto_posting_cycles.repository import available
+            if available(conn):
+                used += conn.execute('SELECT COUNT(*) FROM auto_cycle_targets WHERE media_id=? AND pipeline_id=?',(media_id,workspace)).fetchone()[0]
+                used += conn.execute('SELECT COUNT(*) FROM workspace_album_media WHERE media_id=? AND pipeline_id=?',(media_id,workspace)).fetchone()[0]
             if used:
                 raise HTTPException(409, "Ảnh đang được một job chưa hoàn tất sử dụng, chưa thể xóa")
             conn.execute("DELETE FROM media_assets WHERE id=?", (media_id,))

@@ -44,6 +44,8 @@ def worker_payload(job: dict, data_root: Path) -> dict:
     if not path.is_relative_to(root) or not path.is_file():
         raise ValueError('Invalid owned media path')
     return {key: job[key] for key in ('pipeline_id', 'group_id', 'account_id', 'post_id')} | {
+        'expected_uid_fingerprint':job.get('expected_uid_fingerprint') or '',
+        'expected_image_sha256':job.get('expected_image_sha256') or '',
         'job_id': job['id'], 'group_url': job['group_url'], 'body': job['body'],
         'media': [str(path)], 'anonymous_only': True,
         'posting_mode': job.get('requested_posting_mode') or 'anonymous',

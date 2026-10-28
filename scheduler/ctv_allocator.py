@@ -344,6 +344,9 @@ def allocate(conn, pipeline_id: int, moment: datetime | None = None, provider_co
     job có một khóa idempotent, nên hai worker chạy cùng lúc không thể tạo ra
     hai job giống nhau.
     """
+    from services.auto_posting_cycles import repository as cycles
+    if cycles.available(conn) and cycles.config(conn,pipeline_id):
+        return {'created':[],'skipped':['Workspace đang dùng cấu hình chu kỳ chung.'],'owners':1,'reason_code':'CYCLE_CONFIG_ACTIVE'}
     configs = ctv_auto_post.active_configs(conn, pipeline_id)
     if not configs:
         return {"created": [], "skipped": [], "owners": 0}

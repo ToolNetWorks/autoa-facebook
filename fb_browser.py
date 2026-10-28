@@ -7,6 +7,7 @@ from __future__ import annotations
 from services.facebook_selectors import current_registry, selector_workflow
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ from services.facebook_selectors import active_composer_dialog as registry_compo
 from services.posting_preflight import same_group, session_problem
 from services import posting_mode as posting_identity
 from services.facebook_session import inspect_session
+from services.facebook_account_identity import display_name, matches_session, session_observation
 from services.group_access import inspect_group_access
 from services.post_verifier import newest_permalink, wait_post_outcome, group_post_links, visible_notices
 from services.posting_mode import (enforce_posting_identity, require_anonymous_mode,
@@ -189,8 +191,7 @@ async def facebook_identity(page, uid: str) -> tuple[str, str]:
         button = page.get_by_role("button", name=PROFILE_BUTTON).first
         if await button.count() and await button.is_visible():
             label = (await button.get_attribute("aria-label")) or (await button.inner_text())
-            if label:
-                name = label.strip()[:120]
+            # This label is a UI control, not evidence of the person's name.
             image = button.locator("img").first
             if await image.count():
                 avatar = safe_avatar(await image.get_attribute("src") or "")
@@ -201,11 +202,14 @@ async def facebook_identity(page, uid: str) -> tuple[str, str]:
             await page.goto(f"https://www.facebook.com/profile.php?id={uid}",
                             wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(2500)
-            heading = page.locator("h1").first
-            if await heading.count():
-                text = (await heading.inner_text()).strip()
-                if text and text.lower() not in ("facebook", "trang chủ", "home"):
-                    name = name or text[:120]
+            metadata = page.locator('meta[property="og:title"]')
+            if await metadata.count()==1:
+                name = display_name(await metadata.get_attribute('content') or '')
+            if not name:
+                headings = {display_name(await h.inner_text()) for h in await page.locator('h1').all() if await h.is_visible()}
+                headings.discard('')
+                if len(headings)==1:
+                    name = headings.pop()
             picture = page.locator("image[role=img], [data-testid='profile-picture'] img, img[alt*='profile' i], img[alt*='ảo' i]").first
             if await picture.count():
                 avatar = avatar or safe_avatar(await picture.get_attribute("src") or "")
@@ -214,8 +218,7 @@ async def facebook_identity(page, uid: str) -> tuple[str, str]:
     if not name:
         try:
             title = (await page.title()).strip()
-            if title and "Facebook" not in title:
-                name = title[:120]
+            name = display_name(title)
         except Exception:
             pass
     return name, avatar
@@ -404,6 +407,7 @@ async def check_group(data: dict) -> dict:
                     return outcome
                 await page.wait_for_timeout(4000)
                 access = await inspect_group_access(page, context, url, navigation)
+                outcome['session_observation'] = session_observation(await inspect_session(page,context),os.getenv('APP_SECRET',''))
                 outcome["access_diagnostics"] = access
                 outcome["logged_in"] = access["session_status"] == "connected"
                 outcome["accessible"] = access["accessible"]
@@ -728,6 +732,8 @@ async def attempt_post(data: dict):
                 return result("needs_review", access["details"], evidence_name,
                               session_status=access["session_status"])
             expected = access["resolved_url"]
+            if not matches_session(await inspect_session(page,context),data.get('expected_uid_fingerprint') or '',os.getenv('APP_SECRET','')):
+                return result('needs_review','Phiên Facebook không khớp tài khoản được giao; chưa nhập nội dung.')
             mode = str(data.get("posting_mode") or "anonymous").lower()
             nickname = str(data.get("nickname") or "").strip()
             if mode not in ("anonymous", "nickname"):
@@ -758,6 +764,8 @@ async def attempt_post(data: dict):
                             run_id=run_id)
                 return result("failed", "Text editor unavailable; no post submitted")
             expected_caption = str(data["body"])
+            if data.get('expected_image_sha256') and hashlib.sha256(Path(data['media'][0]).read_bytes()).hexdigest()!=data['expected_image_sha256']:
+                return result('needs_review','Ảnh đã thay đổi so với nội dung được giao; chưa gửi bài.')
             await editor.fill(expected_caption, timeout=15000)
 
             media = list(data.get("media") or [])
@@ -843,6 +851,8 @@ async def attempt_post(data: dict):
                             run_id=run_id)
                 return result("failed", "Publish control disabled; no post submitted")
             final_caption = await editor.inner_text(timeout=5000)
+            if data.get('expected_image_sha256') and hashlib.sha256(Path(data['media'][0]).read_bytes()).hexdigest()!=data['expected_image_sha256']:
+                return result('needs_review','Ảnh đã thay đổi trong lúc chuẩn bị; chưa gửi bài.')
             if (re.sub(r"\s+", " ", final_caption).strip() != re.sub(r"\s+", " ", expected_caption).strip()
                     or not same_group(page.url, expected) or not await attachment_ready(dialog)):
                 return result("needs_review", "Nội dung, ảnh hoặc Group đã thay đổi; chưa gửi bài.")
@@ -850,6 +860,10 @@ async def attempt_post(data: dict):
             if observed_session["status"] != "connected":
                 return result("needs_review", observed_session["details"],
                               session_status=observed_session["status"])
+            expected_uid = data.get('expected_uid_fingerprint')
+            if expected_uid:
+                if not matches_session(observed_session,expected_uid,os.getenv('APP_SECRET','')):
+                    return result('needs_review','Phiên Facebook không khớp tài khoản được giao; chưa gửi bài.')
             baseline_links = await group_post_links(page)
             identity_valid = (await posting_identity.identity_shown(page, actual_identity)
                               if mode == "nickname" else await posting_identity.anonymous_mode_verified(page))
