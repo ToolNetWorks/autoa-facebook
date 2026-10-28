@@ -32,7 +32,7 @@ export function getPostLink(job?: AutoPostJobItem | null): string {
   } catch { return ''; }
 }
 
-export type FilterCategory = 'all' | 'waiting' | 'processing' | 'needs_review' | 'posted' | 'failed';
+export type FilterCategory = 'all' | 'waiting' | 'processing' | 'needs_review' | 'posted' | 'failed' | 'skipped';
 
 export function mapJobStatus(status: string): {
   label: string;
@@ -63,6 +63,8 @@ export function mapJobStatus(status: string): {
       return { label: 'Bị chặn', tone: 'bad', description: 'Bị chặn bởi bộ lọc an toàn hoặc giới hạn' };
     case 'cancelled':
       return { label: 'Đã hủy', tone: 'neutral', description: 'Đã hủy trước khi thực thi' };
+    case 'skipped':
+      return { label: 'Đã bỏ qua', tone: 'neutral', description: 'Đích đã được bỏ qua trong chu kỳ; không có bài đăng thành công' };
     default:
       return { label: status, tone: 'neutral', description: status };
   }
@@ -70,6 +72,7 @@ export function mapJobStatus(status: string): {
 
 export function matchesFilter(job: AutoPostJobItem, filter: FilterCategory): boolean {
   if (filter === 'all') return true;
+  if (filter === 'skipped') return job.status === 'skipped';
   if (filter === 'waiting') return ['pending', 'approved'].includes(job.status);
   if (filter === 'processing') return ['queued', 'running'].includes(job.status);
   if (filter === 'needs_review') return ['needs_review', 'pending_approval', 'submitted_unverified'].includes(job.status);

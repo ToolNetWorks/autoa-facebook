@@ -4,6 +4,11 @@ import { CtvConfigList } from '@/features/auto-posting/CtvConfigList';
 import { SharedAutoPostPanel } from '@/features/auto-posting/SharedAutoPostPanel';
 import { ErrorState } from '@/components/ui/Surfaces';
 import type { WorkspaceData } from '@/features/workspace/useWorkspace';
+import { useAsync } from '@/hooks/useAsync';
+import { api, ApiError } from '@/services/apiClient';
+import { Skeleton } from '@/components/ui/Surfaces';
+import { CycleWorkspace } from './cycles/CycleWorkspace';
+import type { CycleConfig } from './cycles/types';
 
 /**
  * The automatic posting section.
@@ -14,6 +19,14 @@ import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 export function AutoPostingSection({ workspace }: { workspace: WorkspaceData }) {
   const { isAdmin } = useAuth();
   const pipelineId = workspace.pipelineId;
+  const cycles = useAsync(async signal => {
+    if (!pipelineId) return null;
+    try { return await api.get<CycleConfig>(`/api/pipelines/${pipelineId}/auto-post/cycle-config`,signal); }
+    catch (error) {
+      if (error instanceof ApiError && error.status === 503 && (error.detail as {code?: string})?.code === 'CYCLE_SCHEMA_REQUIRED') return null;
+      throw error;
+    }
+  },[pipelineId]);
 
   if (!pipelineId) {
     return (
@@ -23,6 +36,10 @@ export function AutoPostingSection({ workspace }: { workspace: WorkspaceData }) 
       />
     );
   }
+  if (cycles.loading && !cycles.data) return <Skeleton variant="block" />;
+  if (cycles.error) return <ErrorState title="Chưa tải được Auto Posting" description={cycles.error} />;
+  if (cycles.data && cycles.data.pipeline_id !== pipelineId) return <Skeleton variant="block" />;
+  if (cycles.data) return <CycleWorkspace key={pipelineId} pipelineId={pipelineId} accounts={workspace.accounts} config={cycles.data} onChanged={cycles.reload} />;
 
   return (
     <div className="stack">

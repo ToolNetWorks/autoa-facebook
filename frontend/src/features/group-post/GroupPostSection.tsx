@@ -38,6 +38,7 @@ const STATE_FILTERS = [
   { value: 'posted', label: 'Đã đăng' },
   { value: 'failed', label: 'Thất bại' },
   { value: 'cancelled', label: 'Đã hủy' },
+  { value: 'skipped', label: 'Đã bỏ qua' },
 ] as const;
 
 const STATUS_LABELS: Record<string, string> = {
@@ -48,6 +49,7 @@ const STATUS_LABELS: Record<string, string> = {
   posted: 'Đã đăng',
   failed: 'Thất bại',
   cancelled: 'Đã hủy',
+  skipped: 'Đã bỏ qua',
   needs_review: 'Cần xem lại',
   scheduled: 'Chờ đăng',
   processing: 'Đang xử lý',
