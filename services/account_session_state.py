@@ -40,6 +40,12 @@ def record_check(conn, pipeline_id: int, account_id: int, outcome: dict, checked
         import hmac
         if fingerprint_uid is None or not hmac.compare_digest(fingerprint_uid(uid), row['fb_uid_fingerprint']):
             raise SessionIdentityMismatch('Browser identity does not match account')
+    if status == 'connected' and fingerprint_uid is not None:
+        from services.account_identity import claim, DuplicateFacebookIdentity
+        try:
+            claim(conn,account_id,pipeline_id,fingerprint_uid(uid))
+        except DuplicateFacebookIdentity as error:
+            raise SessionIdentityMismatch('Facebook identity already registered') from error
     conn.execute('''UPDATE accounts SET session_status=?,session_checked_at=?,session_details=?,updated_at=?,
                      fb_name=?,fb_avatar=?,fb_uid_enc=? WHERE id=? AND pipeline_id=?''',
                  (status, checked_at, str(outcome.get('details') or '')[:500], checked_at,

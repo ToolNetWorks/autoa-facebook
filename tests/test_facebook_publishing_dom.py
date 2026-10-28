@@ -38,6 +38,13 @@ class PublishingDOMTests(unittest.IsolatedAsyncioTestCase):
         await self.pw.stop()
         self.temp.cleanup()
 
+    async def test_account_display_name_uses_profile_metadata_not_generic_control(self):
+        import fb_browser
+        await self.page.set_content('<button aria-label="Account, your profile">Account</button><h1>Quản lý trang cá nhân</h1><meta property="og:title" content="Fixture Account | Facebook">')
+        with patch.object(self.page,'goto',AsyncMock()), patch.object(self.page,'wait_for_timeout',AsyncMock()):
+            name,_=await fb_browser.facebook_identity(self.page,'123')
+        self.assertEqual(name,'Fixture Account')
+
     async def test_semantic_profile_and_reel_publish_ambiguity(self):
         await self.page.set_content('<button>Create post</button><button>Publish reel</button><button>Publish reel</button>')
         registry = SelectorRegistry(profile='desktop_semantic', locales=('en',))

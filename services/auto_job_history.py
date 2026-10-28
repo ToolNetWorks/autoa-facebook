@@ -3,6 +3,7 @@ CATEGORIES = {
     'waiting': ('pending', 'approved'), 'processing': ('queued', 'running'),
     'needs_review': ('needs_review', 'pending_approval', 'submitted_unverified'),
     'posted': ('posted', 'published'), 'failed': ('failed', 'blocked', 'cancelled'),
+    'skipped': ('skipped',),
 }
 
 CTE = """WITH history AS (
@@ -54,6 +55,8 @@ def read_history(conn, pipeline_id: int, status: str | None, limit: int) -> dict
 def public_failure(details: str, state: str) -> tuple[str,str]:
     """Map legacy diagnostics on the server; never expose worker/DOM/SQL text."""
     text=str(details or '').casefold()
+    if state=='skipped':
+        return ('SKIPPED_GROUP_DISABLED','Group Bị Vô Hiệu Hoá; đã bỏ qua.') if 'skipped_group_disabled' in text else ('DESTINATION_SKIPPED','Đích đăng đã được bỏ qua trong chu kỳ này.')
     if state in ('submitted_unverified','pending_approval'):
         return 'SUBMISSION_REVIEW_REQUIRED','Cần đối chiếu kết quả trên Facebook; không gửi lại bài.'
     if any(word in text for word in ('checkpoint','captcha','xác minh bảo mật')):

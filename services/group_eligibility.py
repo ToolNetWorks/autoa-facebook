@@ -117,6 +117,10 @@ def pair_decision(conn, pipeline_id: int, account_id: int, group_id: int,
                     MODE_ANONYMOUS)
 
     mode, nickname = mode_of(conn, account_id, group_id, group)
+    from services.auto_posting_cycles.repository import global_state
+    if global_state(conn,pipeline_id,group_id)=='DISABLED':
+        return _no(group_verification.NOT_TESTED,'Group Bị Vô Hiệu Hoá',
+                   'Chờ xác minh lại trạng thái Group.',mode)
     if for_scheduling:
         return _schedule_decision(group, mode)
 
