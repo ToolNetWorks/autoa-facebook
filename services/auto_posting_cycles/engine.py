@@ -111,6 +111,14 @@ def schedule_due(conn, moment, rng=None):
                 continue
             if not conn.execute('SELECT 1 FROM pipelines WHERE id=? AND enabled=1',(cycle['pipeline_id'],)).fetchone():
                 continue
+            # After downtime all observations may be stale. Allow bounded time
+            # for existing read-only probes; never delay healthy destinations.
+            if moment-clock.parse(cycle['created_at'])<timedelta(minutes=30):
+                cycle_settings=json.loads(cycle['settings_json'])
+                selected=_selected_groups(conn,cycle['pipeline_id'],cycle_settings)
+                pending=conn.execute("SELECT 1 FROM screening_queue WHERE pipeline_id=? AND state IN ('queued','running')",(cycle['pipeline_id'],)).fetchone()
+                if pending and selected and not any(assignment.choose(conn,cycle['pipeline_id'],g['id'],cycle_settings,moment,rng) for g in selected):
+                    continue
             plan_cycle(conn,cycle,moment,rng)
         except Exception as error:
             conn.execute('ROLLBACK TO one_cycle')

@@ -113,6 +113,17 @@ back another Pipeline's planning. Manual requests are durable and idempotent eve
 when session/Group evidence later prevents execution. `NO_ELIGIBLE_ACCOUNT` is a
 per-destination result, not deletion of the cycle request.
 
+`refresh.enqueue_due` warms evidence after 22 hours using the existing Group
+screening queue, bounded to twenty enqueue operations per timer pass. It checks
+only known joined pairs on accounts last verified connected, excludes disabled
+Groups/checkpoint accounts and never Joins or Submits. A private browser result
+carries a fingerprint rather than raw UID; `record_probe` refreshes connected only
+when that fingerprint matches the account. After downtime, a pending cycle with
+no healthy destinations can wait at most thirty minutes for queued probes; healthy
+destinations are not delayed. Interrupted read-only probes have bounded recovery.
+Post-result refresh preserves anonymous/nickname evidence and the timestamp of
+the actual Group check instead of manufacturing a new verification time.
+
 Quotas include existing executions, outstanding reservations, preparing targets
 and Reels. Account and Group cooldowns are rechecked when claiming. SQL claims and
 the existing OS profile lock prevent concurrent use of an account. Preparation

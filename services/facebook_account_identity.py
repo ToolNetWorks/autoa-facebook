@@ -20,3 +20,12 @@ def matches_session(observed: dict, fingerprint: str, secret: str) -> bool:
     uid = str(observed.get('uid') or '')
     return bool(secret and uid.isdigit() and hmac.compare_digest(
         hmac.new(secret.encode(),uid.encode(),hashlib.sha256).hexdigest(),fingerprint))
+
+
+def session_observation(observed: dict, secret: str) -> dict:
+    """Private worker proof: never return raw UID or cookie values."""
+    import hashlib
+    import hmac
+    uid = str(observed.get('uid') or '')
+    fingerprint = hmac.new(secret.encode(),uid.encode(),hashlib.sha256).hexdigest() if secret and uid.isdigit() else ''
+    return {'status':observed.get('status','unknown'),'fingerprint':fingerprint}

@@ -29,7 +29,7 @@ from services.facebook_selectors import active_composer_dialog as registry_compo
 from services.posting_preflight import same_group, session_problem
 from services import posting_mode as posting_identity
 from services.facebook_session import inspect_session
-from services.facebook_account_identity import display_name, matches_session
+from services.facebook_account_identity import display_name, matches_session, session_observation
 from services.group_access import inspect_group_access
 from services.post_verifier import newest_permalink, wait_post_outcome, group_post_links, visible_notices
 from services.posting_mode import (enforce_posting_identity, require_anonymous_mode,
@@ -407,6 +407,7 @@ async def check_group(data: dict) -> dict:
                     return outcome
                 await page.wait_for_timeout(4000)
                 access = await inspect_group_access(page, context, url, navigation)
+                outcome['session_observation'] = session_observation(await inspect_session(page,context),os.getenv('APP_SECRET',''))
                 outcome["access_diagnostics"] = access
                 outcome["logged_in"] = access["session_status"] == "connected"
                 outcome["accessible"] = access["accessible"]

@@ -69,6 +69,7 @@ from api import group_posts as group_posts_api
 from api import verification as verification_api
 from api import auto_cycles as auto_cycles_api
 from services.auto_posting_cycles import engine as cycle_engine, runtime as cycle_runtime, repository as cycle_repository
+from services.auto_posting_cycles import refresh as cycle_refresh
 from services.account_identity import claim as claim_facebook_identity, DuplicateFacebookIdentity
 from services.media_fingerprint import file_sha256, hamming_distance, perceptual_signature
 from services.media_probe import ReelPolicy
@@ -724,6 +725,7 @@ def init_db():
          CREATE INDEX IF NOT EXISTS idx_screening_queue_state ON screening_queue(state,id);
          CREATE INDEX IF NOT EXISTS idx_screening_results_pipeline ON group_screening_results(pipeline_id,group_id);
          """)
+        cycle_refresh.recover_probes(conn,iso())
         # V2026-10-20: add OCR/category/issues/policy columns to video_prechecks
         _pc = {c[1] for c in conn.execute("PRAGMA table_info(video_prechecks)")}
         for _col, _ddl in [
@@ -3194,9 +3196,15 @@ def refresh_screening_for_job(conn, job_id: int) -> None:
                  "can_post": stored.get("can_post"),
                  "requires_approval": stored.get("requires_approval"),
                  "rules_mention_approval": stored.get("rules_mention_approval"),
+                 "supports_anonymous": stored.get("supports_anonymous"),
+                 "supports_nickname": stored.get("supports_nickname"),
+                 "nickname_available": stored.get("nickname_available"),
                  "group_name": stored.get("group_name", ""),
                  "details": stored.get("check_details", "")}
     store_screening_result(conn, job["pipeline_id"], job["account_id"], job["group_id"], check)
+    if row is not None:
+        conn.execute('UPDATE group_screening_results SET last_checked_at=?,expires_at=? WHERE pipeline_id=? AND account_id=? AND group_id=?',
+            (row['last_checked_at'],row['expires_at'],job['pipeline_id'],job['account_id'],job['group_id']))
     # Phân loại được học từ kết quả đăng bài thật của chính cặp này.
     verification = group_verification.row_of(conn, job["pipeline_id"], job["account_id"],
                                             job["group_id"])
@@ -3251,6 +3259,7 @@ def enqueue_screening(conn, pipeline_id: int, account_id: int, group_id: int, fo
 def claim_screening_item():
     """Take the next group out of the screening queue, one at a time."""
     with db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
         rows = conn.execute("""SELECT * FROM screening_queue WHERE state='queued' ORDER BY id""").fetchall()
         for row in rows:
             if not row["force"]:
@@ -3279,7 +3288,7 @@ def run_screening_item(item: dict) -> None:
             return
         config = group_config(conn, item["group_id"])
         url = group["url"]
-        nickname = config["nickname"]
+        _,nickname = group_eligibility.mode_of(conn,item['account_id'],item['group_id'],group)
         account_id = item["account_id"]
         pipeline_id = item["pipeline_id"]
     try:
@@ -3291,6 +3300,8 @@ def run_screening_item(item: dict) -> None:
                          (f"{type(error).__name__}", iso(), item["id"]))
         return
     with db() as conn:
+        if not account_session_state.record_probe(conn,pipeline_id,account_id,check.pop('session_observation',None),iso()):
+            check.update(status='error',accessible=None,is_member=None,can_post=None,details='Chưa xác minh được danh tính phiên Facebook; cần kiểm tra lại tài khoản.')
         store_screening_result(conn, pipeline_id, account_id, item["group_id"], check)
         conn.execute("""UPDATE screening_queue SET state='done', attempts=attempts+1,
                         last_error=?, updated_at=? WHERE id=?""",
@@ -4412,6 +4423,7 @@ def prepare_auto_post_jobs() -> None:
     Workspace: nếu CTV đã tự cấu hình thì bộ xếp lịch của CTV chạy, bộ xếp lịch
     chung bỏ qua Workspace đó. Nhờ vậy một group không bị xếp lịch hai lần.
     """
+    cycle_refresh.enqueue_due(db,now(),enqueue_screening)
     cycle_pipelines = cycle_engine.tick(db,now(),provider_config=load_ai_config())
     with db() as conn:
         ctv_pipelines = {int(row["pipeline_id"]) for row in conn.execute(
@@ -5194,6 +5206,9 @@ def check_pipeline_group(pipeline_id: int, group_id: int, principal: Principal =
     finally:
         payload_file.unlink(missing_ok=True)
         result_file.unlink(missing_ok=True)
+    with db() as conn:
+        if not account_session_state.record_probe(conn,pipeline_id,config['account_id'],outcome.pop('session_observation',None),iso()):
+            outcome.update(status='error',accessible=None,is_member=None,can_post=None,details='Cần kiểm tra lại danh tính phiên Facebook.')
     status = str(outcome.get("status", "unknown"))
     if status not in ("ok", "unknown", "needs_review", "not_member", "no_access", "error", "busy"):
         status = "unknown"

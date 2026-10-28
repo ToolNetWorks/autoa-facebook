@@ -48,8 +48,9 @@ separate review dependency; do not merge it automatically.
    release. Preserve .env, private data, cookies and profiles. The original checkout
    is dirty; do not reset it or copy an incomplete subset over running production.
 6. Start exactly one approved service, check health, PID/source/UI checksums, logs,
-   row counts, foreign keys and migration versions. Keep Auto Posting OFF until an
-   operator reviews accounts, Groups, media, identity and effective Admin limits.
+   row counts, foreign keys and migration versions. Keep Auto Posting OFF until
+   separate publication approval and operator review of accounts, Groups, media,
+   identity and effective Admin limits.
 7. Operator uses existing credentials securely. Verify Admin and CTV Dashboard,
    two-Pipeline RBAC, session timestamps, Group URLs, actual History and report
    counts. A missing V21 schema keeps legacy UI/API functional; new cycle endpoints

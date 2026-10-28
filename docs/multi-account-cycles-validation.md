@@ -8,8 +8,9 @@ Changes are in an isolated Git worktree, not the running production checkout.
 | Check | Result | Evidence |
 | --- | --- | --- |
 | V20 regression, 31 Python modules | 455 PASS; 0 failures/errors/skips; 403.50s | `/tmp/toolnet-multi-account-regression.xml` and `.log` |
-| New cycle acceptance, five Python modules | 38 PASS; 0 failures/errors/skips; 98.05s | `/tmp/toolnet-cycle-acceptance-final.xml` and `.log` |
-| Distinct cases | **493 PASS** | Suites cover distinct test functions |
+| New cycle acceptance, six Python modules | 43 PASS; 0 failures/errors/skips; 83.84s | `/tmp/toolnet-cycle-acceptance-final.xml` and `.log` |
+| Affected-module regression after evidence/session fixes, seven modules | 145 PASS; 0 failures/errors/skips; 143.41s | `/tmp/toolnet-cycle-refresh-regression.xml` and `.log` |
+| Distinct cases | **498 PASS** | Suites cover distinct test functions |
 | Frontend typecheck | PASS | `npm run typecheck` |
 | Frontend production build | PASS | `npm run build -- --outDir /tmp/toolnet-multi-account-frontend` |
 | Responsive browser checks | PASS | Four cycle screens at 390, 402, 430, 440, 768, 834, 1280, 1440px |
@@ -28,7 +29,8 @@ DATA_DIR=/tmp/toolnet-cycle-acceptance-final PYTHONPATH=.:tests/helpers \
   /root/facebook-pipeline-manager/.venv/bin/python -m pytest -p offline_runtime \
   tests/test_auto_cycles.py tests/test_auto_cycles_runtime.py \
   tests/test_auto_cycle_clock.py tests/test_auto_cycles_migration.py \
-  tests/test_auto_cycles_e2e.py -q --disable-warnings --maxfail=3 --tb=short \
+  tests/test_auto_cycles_e2e.py tests/test_auto_cycles_refresh.py \
+  -q --disable-warnings --maxfail=3 --tb=short \
   -o faulthandler_timeout=60 \
   --junitxml=/tmp/toolnet-cycle-acceptance-final.xml
 ```
@@ -70,6 +72,13 @@ DATA_DIR=/tmp/toolnet-cycle-acceptance-final PYTHONPATH=.:tests/helpers \
   incompatible pre-existing index-name rejection.
 - Legacy shared/CTV/distribute APIs cannot create parallel automatic work once a
   cycle configuration exists, even when that configuration is paused.
+- Automatic Group-probe warmup and an overdue second-day cycle after session/pair
+  evidence exceeds 24 hours. Existing probes refresh only matching identities;
+  checkpoint accounts and disabled Groups are excluded, preparation is bounded,
+  and probe recovery never retries Submit. A mismatched profile cannot mark the
+  account connected or create false membership evidence. Proof omits raw UID.
+- Post-outcome refresh retains anonymous/nickname support and the original check
+  timestamp, avoiding immediate loss of eligibility or false freshness.
 
 ## End-to-end boundary and screenshots
 
@@ -91,12 +100,13 @@ Admin authentication or Facebook publication evidence.
 
 Earlier attempts exposed fixture schema/DB-path/unique-key mistakes and a real
 frontend 500-detail leak. These were corrected and the final suites rerun. Additional
-review fixed legacy allocator bypass, Group cooldown checks and crash-state history
-reconciliation. The counts above are the final results, not sums of repeated runs.
+review fixed legacy allocator bypass, Group cooldown checks, crash-state history
+reconciliation and the older evidence/session lifecycle blockers. The counts above
+are distinct cases, not sums of repeated runs.
 
 ## Delivery and remaining gates
 
-- Runtime changes span 39 application/migration/release-script files; seven test
+- Runtime changes span 40 application/migration/release-script files; eight test
   files are added/changed, plus three documents. The existing 29-file V20 patch is
   inherited from PR #1, not reapplied over production source.
 - `fpm.service` was inspected read-only: active/running, MainPID 1369909, started
