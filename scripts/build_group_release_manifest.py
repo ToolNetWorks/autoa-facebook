@@ -31,6 +31,7 @@ def build(frontend):
     return {'git_commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT).decode().strip(),
             'source_sha256':sources,'frontend_sha256':assets,'selector_version':'v2',
             'schema_runtime_minimum':19,'membership_migration':20,
+            'feature_schema_requirements':{'posting_cycles':21,'unique_ctv_membership':20,'nickname_evidence':19},
             'deploy_authorized':False,'facebook_submit_authorized':False}
 
 
