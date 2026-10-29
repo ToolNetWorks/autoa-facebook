@@ -77,9 +77,9 @@ SELECT j.id post_id, 'group_post' content_type, j.pipeline_id, j.account_id,
        p.body, p.owner_user_id created_by, p.id source_post_id,
        g.label group_label, g.url group_url, a.label account_label,
        'group' content_kind
-  FROM jobs j JOIN posts p ON p.id = j.post_id
-  LEFT JOIN groups g ON g.id = j.group_id
-  LEFT JOIN accounts a ON a.id = j.account_id
+  FROM jobs j JOIN posts p ON p.id = j.post_id AND p.pipeline_id = j.pipeline_id
+  LEFT JOIN groups g ON g.id = j.group_id AND g.pipeline_id = j.pipeline_id
+  LEFT JOIN accounts a ON a.id = j.account_id AND a.pipeline_id = j.pipeline_id
 UNION ALL
 SELECT t.id post_id, 'reel' content_type, t.pipeline_id, t.account_id,
        t.status posting_status, NULL state,
@@ -87,7 +87,7 @@ SELECT t.id post_id, 'reel' content_type, t.pipeline_id, t.account_id,
        t.body, t.owner_user_id created_by, NULL source_post_id,
        NULL group_label, NULL group_url, a.label account_label,
        'reel' content_kind
-  FROM manual_tasks t LEFT JOIN accounts a ON a.id = t.account_id
+  FROM manual_tasks t LEFT JOIN accounts a ON a.id = t.account_id AND a.pipeline_id = t.pipeline_id
  WHERE t.task_type = 'reel'
 """
 
@@ -148,6 +148,8 @@ def content_rows(conn, pipeline_id: int | None = None, account_id: int | None = 
         if (start or end) and not _within(moment, start, end):
             continue
         snapshot = snapshots.get((row["content_type"], row["post_id"]))
+        if snapshot and (snapshot["pipeline_id"] != row["pipeline_id"] or snapshot["account_id"] != row["account_id"]):
+            snapshot = None
         row["snapshot"] = snapshot
         row["engagement"] = engagement_of(snapshot)
         row["views"] = snapshot.get("views_count") if snapshot else None

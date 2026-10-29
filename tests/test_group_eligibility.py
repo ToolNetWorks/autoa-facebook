@@ -382,7 +382,7 @@ def test_an_eligible_group_without_a_picture_creates_no_job(client):
 
 # --- 14. CTV chọn nhiều group nhưng chỉ một số đủ điều kiện -----------------
 
-def test_only_the_eligible_groups_of_a_selection_are_served(client):
+def test_unverified_membership_does_not_prevent_scheduling_but_blocks_execution(client):
     pipeline = make_pipeline(client, '@el14')
     account = make_account(client, pipeline, 'Facebook')
     good = make_group(client, pipeline, account, 'Group đạt',
@@ -393,12 +393,19 @@ def test_only_the_eligible_groups_of_a_selection_are_served(client):
         store_result(conn, pipeline, account, good, STATUS_PRIORITY)
         store_result(conn, pipeline, account, bad, STATUS_NOT_MEMBER,
                      check_status="not_member", is_member=False, can_post=None)
+        group_membership.record(conn,pipeline,account,bad,group_membership.NOT_MEMBER)
     make_picture(client, pipeline)
     enable_auto_post(client, pipeline, group_ids=[good, bad])
     preview = client.post(f'/api/pipelines/{pipeline}/auto-post/preview').json()['preview']
     served = {post['group_id'] for post in preview['posts']}
     assert good in served
-    assert bad not in served
+    assert bad in served  # Scheduling is independent of execution checks.
+    scheduled = client.post(f'/api/pipelines/{pipeline}/auto-post/schedule')
+    assert scheduled.status_code == 201, scheduled.text
+    with m.db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM auto_post_jobs WHERE pipeline_id=? AND group_id=?", (pipeline,bad)).fetchone()[0] == 1
+        decision = group_eligibility.pair_decision(conn,pipeline,account,bad)
+        assert decision["eligible"] is False
 
 
 # --- 15. scheduler restart không tạo job trùng ------------------------------

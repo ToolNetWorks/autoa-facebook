@@ -108,9 +108,49 @@ def record(conn, pipeline_id: int, kind: str, fingerprint: str, media_id: int | 
                  (int(pipeline_id), kind, fingerprint, media_id, job_id, group_id))
 
 
+#: Trạng thái job tự động không giữ chỗ nội dung: job chưa từng được gửi đi.
+RELEASED_JOB_STATUSES = ("failed", "cancelled")
+
+#: Trạng thái job tự động vẫn đang chờ đăng.
+ACTIVE_JOB_STATUSES = ("pending", "approved", "waiting_login", "needs_action", "queued")
+
+
+def _group_of_row(conn, row: dict) -> int | None:
+    """Group của một dấu vết; dấu vết cũ chưa ghi group thì tra theo job."""
+    if row.get("group_id") is not None:
+        return int(row["group_id"])
+    if row.get("job_id"):
+        job = conn.execute("SELECT group_id FROM auto_post_jobs WHERE id=?",
+                           (row["job_id"],)).fetchone()
+        if job is not None and job["group_id"] is not None:
+            return int(job["group_id"])
+    return None
+
+
+def _group_history(conn, pipeline_id: int, group_id: int) -> list[dict]:
+    """Ảnh và caption đã dùng cho đúng group này.
+
+    Đây là nguồn chính cho việc chống trùng trong group: bảng dấu vết chỉ giữ
+    một dòng cho mỗi ảnh trên toàn Pipeline, nên không đủ để biết ảnh đã vào
+    những group nào.
+    """
+    rows = conn.execute(f"""SELECT j.caption, m.sha256, m.signature
+                             FROM auto_post_jobs j LEFT JOIN media_assets m ON m.id=j.media_id
+                            WHERE j.pipeline_id=? AND j.group_id=?
+                              AND j.status NOT IN ({",".join("?" for _ in RELEASED_JOB_STATUSES)})
+                              AND datetime(j.created_at) >= datetime('now', ?)""",
+                        (int(pipeline_id), int(group_id), *RELEASED_JOB_STATUSES,
+                         f"-{REPEAT_WINDOW_DAYS} days")).fetchall()
+    return [dict(row) for row in rows]
+
+
 def check(conn, pipeline_id: int, media: dict, caption: str, group_id: int | None = None,
           account_id: int | None = None) -> dict:
     """Kiểm tra một nội dung có bị trùng không.
+
+    Khi có ``group_id``, chỉ chặn trùng trong **đúng group đó**: một ảnh hay
+    một caption được phép dùng cho các group khác nhau, nhưng không được lặp
+    lại trong cùng một group. Không có ``group_id`` thì so trên toàn Pipeline.
 
     Trả về ``{"blocked": bool, "reason": str, "kind": str}``. Khi không có
     trùng, ``reason`` rỗng.
@@ -122,41 +162,55 @@ def check(conn, pipeline_id: int, media: dict, caption: str, group_id: int | Non
     near = near_fingerprint(media.get("signature") if media else "")
     caption_hash = caption_fingerprint(caption)
     content = content_fingerprint(exact, caption)
+    signature = (media.get("signature") if media else "") or ""
+
+    if group_id is not None:
+        for used in _group_history(conn, pipeline_id, group_id):
+            if exact and media_fingerprint(used.get("sha256") or "") == exact:
+                return {"blocked": True, "kind": KIND_MEDIA_EXACT,
+                        "reason": "Ảnh này đã được dùng cho group này"}
+            if signature and used.get("signature") and is_near_duplicate(signature, used["signature"]):
+                return {"blocked": True, "kind": KIND_MEDIA_NEAR,
+                        "reason": "Ảnh gần giống ảnh đã dùng cho group này"}
+            if caption_hash and caption_fingerprint(used.get("caption") or "") == caption_hash:
+                return {"blocked": True, "kind": KIND_CAPTION,
+                        "reason": "Caption này đã được dùng cho group này"}
 
     known = recent_fingerprints(conn, pipeline_id, (KIND_MEDIA_EXACT, KIND_MEDIA_NEAR, KIND_CAPTION,
                                                       KIND_CONTENT))
     for row in known:
+        if group_id is not None:
+            row_grp = _group_of_row(conn, row)
+            if row_grp is None or row_grp != int(group_id):
+                continue
         if exact and row["kind"] == KIND_MEDIA_EXACT and row["fingerprint"] == exact:
             return {"blocked": True, "kind": KIND_MEDIA_EXACT,
-                    "reason": "Ảnh này đã được dùng trong Pipeline"}
+                    "reason": "Ảnh này đã được dùng cho group này" if group_id is not None
+                    else "Ảnh này đã được dùng trong Pipeline"}
         if content and row["kind"] == KIND_CONTENT and row["fingerprint"] == content:
             return {"blocked": True, "kind": KIND_CONTENT,
-                    "reason": "Ảnh và caption này đã được đăng trong Pipeline"}
+                    "reason": "Group này đã nhận nội dung tương tự" if group_id is not None
+                    else "Ảnh và caption này đã được đăng trong Pipeline"}
         if caption_hash and row["kind"] == KIND_CAPTION and row["fingerprint"] == caption_hash:
-            # Cùng caption được dùng lại ở group khác là chuyện bình thường;
-            # cùng group thì không được lặp lại.
-            if group_id is not None and row.get("group_id") not in (None, group_id):
-                continue
             return {"blocked": True, "kind": KIND_CAPTION,
-                    "reason": "Caption này đã được dùng cho group này"}
-    if near:
-        for row in known:
-            if row["kind"] != KIND_MEDIA_NEAR:
-                continue
+                    "reason": "Caption này đã được dùng cho group này" if group_id is not None
+                    else "Caption này đã được dùng trong Pipeline"}
+        if near and row["kind"] == KIND_MEDIA_NEAR:
             other = row["fingerprint"].split(":", 1)[-1]
-            if is_near_duplicate(near, other):
+            if is_near_duplicate(near.split(":", 1)[-1], other):
                 return {"blocked": True, "kind": KIND_MEDIA_NEAR,
-                        "reason": "Ảnh gần giống ảnh đã đăng trong Pipeline"}
-
-    # Nhóm đã nhận nội dung này rồi thì không đăng lần nữa.
-    if group_id and (exact or caption_hash):
-        for row in known:
-            if row["kind"] != KIND_CONTENT:
-                continue
-            if content and row["fingerprint"] == content:
-                return {"blocked": True, "kind": KIND_CONTENT,
-                        "reason": "Group này đã nhận nội dung tương tự"}
+                        "reason": "Ảnh gần giống ảnh đã dùng cho group này" if group_id is not None
+                        else "Ảnh gần giống ảnh đã đăng trong Pipeline"}
     return {"blocked": False, "reason": "", "kind": ""}
+
+
+def active_job_group_ids(conn, pipeline_id: int) -> set[int]:
+    """Các group đang có bài tự động chờ đăng, để không xếp thêm bài chồng lên."""
+    rows = conn.execute(f"""SELECT DISTINCT group_id FROM auto_post_jobs
+                            WHERE pipeline_id=? AND group_id IS NOT NULL
+                              AND status IN ({",".join("?" for _ in ACTIVE_JOB_STATUSES)})""",
+                        (int(pipeline_id), *ACTIVE_JOB_STATUSES)).fetchall()
+    return {int(row["group_id"]) for row in rows}
 
 
 def was_refused(conn, pipeline_id: int, media_id: int | None, caption: str) -> bool:

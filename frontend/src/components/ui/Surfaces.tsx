@@ -39,9 +39,34 @@ export function Card({
   );
 }
 
-export function Stat({ label, value, muted }: { label: ReactNode; value: ReactNode; muted?: boolean }) {
+export function Stat({
+  label,
+  value,
+  muted,
+  onClick,
+}: {
+  label: ReactNode;
+  value: ReactNode;
+  muted?: boolean;
+  onClick?: () => void;
+}) {
   return (
-    <div className="stat">
+    <div
+      className={`stat ${muted ? 'muted' : ''} ${onClick ? 'stat-clickable' : ''}`}
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
+    >
       <span>{label}</span>
       <strong className={muted ? 'muted' : undefined}>{value}</strong>
     </div>

@@ -213,10 +213,12 @@ def resolve_principal(conn, cookie_token: str) -> Principal | None:
     pipeline_id = row["pipeline_id"]
     permissions: set[str] = set()
     if row["role"] == ROLE_CTV:
-        membership = conn.execute(
-            """SELECT pipeline_id, permissions_json, status FROM pipeline_memberships
-               WHERE user_id=? AND pipeline_id=?""", (row["user_id"], pipeline_id)).fetchone()
-        if membership is None or membership["status"] != STATUS_ACTIVE:
+        from services.pipeline_membership_policy import MembershipConflict, unique_active_membership
+        try:
+            membership = unique_active_membership(conn, row["user_id"])
+        except MembershipConflict:
+            return None
+        if membership is None or membership["pipeline_id"] != pipeline_id:
             return None
         pipeline = conn.execute("SELECT enabled FROM pipelines WHERE id=?", (pipeline_id,)).fetchone()
         if pipeline is None or not pipeline["enabled"]:

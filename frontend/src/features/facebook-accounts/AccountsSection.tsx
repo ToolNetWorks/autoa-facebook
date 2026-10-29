@@ -11,7 +11,10 @@ import type { WorkspaceData } from '@/features/workspace/useWorkspace';
 
 const SESSION_LABELS: Record<string, { label: string; tone: 'ok' | 'warn' | 'bad' | 'neutral' }> = {
   connected: { label: 'Đã đăng nhập', tone: 'ok' },
-  expired: { label: 'Phiên hết hạn', tone: 'bad' },
+  expired: { label: 'Cần đăng nhập lại', tone: 'bad' },
+  checkpoint: { label: 'Cần xác minh bảo mật', tone: 'warn' },
+  restricted: { label: 'Facebook hạn chế thao tác', tone: 'bad' },
+  stale: { label: 'Cần kiểm tra lại', tone: 'warn' },
   unknown: { label: 'Chưa kiểm tra', tone: 'neutral' },
   error: { label: 'Lỗi kiểm tra', tone: 'bad' },
   busy: { label: 'Đang bận', tone: 'warn' },
@@ -59,7 +62,7 @@ export function AccountsSection({ workspace }: { workspace: WorkspaceData }) {
       if (action === 'check') {
         const result = await api.post<{ status: string }>(`/api/accounts/${account.id}/check`);
         push(
-          result.status === 'connected' ? 'Phiên đăng nhập còn hiệu lực' : 'Phiên đăng nhập không còn hiệu lực',
+          SESSION_LABELS[result.status]?.label ?? 'Chưa xác minh được phiên Facebook',
           result.status === 'connected' ? 'success' : 'warn',
         );
       } else if (action === 'connect') {
@@ -131,7 +134,7 @@ export function AccountsSection({ workspace }: { workspace: WorkspaceData }) {
         <Card>
           <DataTable head={['Tài khoản', 'Phiên', 'Cách kết nối', 'Nguồn', 'Thao tác']}>
             {accounts.map((account) => {
-              const session = SESSION_LABELS[account.session_status] ?? SESSION_LABELS.unknown;
+              const session = SESSION_LABELS[account.session_display_status ?? account.session_status] ?? SESSION_LABELS.unknown;
               return (
                 <tr key={account.id}>
                   <td>

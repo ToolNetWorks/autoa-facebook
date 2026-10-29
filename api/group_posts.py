@@ -25,7 +25,7 @@ class GroupPostCampaign(BaseModel):
 
     group_ids: list[int] = Field(min_length=1)
     body: str = Field(min_length=1, max_length=20000)
-    media: list[str] = Field(min_length=1, max_length=4)
+    media: list[str] = Field(min_length=1, max_length=1)
     scheduled_at: str
     ai_record_id: int | None = None
 
@@ -157,7 +157,7 @@ def build_router(deps: Deps) -> APIRouter:
             try:
                 plan = group_post_validator.validate_selection(
                     conn, pipeline_id, group_ids, principal, group_lookup, account_lookup,
-                    may_publish)
+                    may_publish, scheduled=scheduled)
             except group_post_validator.ValidationError as error:
                 raise HTTPException(422, error.full_message()) from error
 

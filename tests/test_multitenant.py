@@ -485,12 +485,13 @@ def test_concurrent_access_does_not_duplicate_or_leak(client):
     for payload in results:
         assert len(payload) == 1
         assert payload[0]['pipeline_id'] == pipeline['id']
+    empty_pipeline = client.post('/api/admin/pipelines', json={'name':'@race-new'}).json()
     # creating the same username concurrently must produce exactly one account
     created = []
 
     def creator(index):
         response = client.post('/api/admin/users', json={
-            'username': 'ctv_race_dup', 'password': CTV_PASSWORD, 'pipeline_id': pipeline['id']})
+            'username': 'ctv_race_dup', 'password': CTV_PASSWORD, 'pipeline_id': empty_pipeline['id']})
         with lock:
             created.append(response.status_code)
 

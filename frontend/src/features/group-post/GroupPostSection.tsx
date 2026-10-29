@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '@/services/apiClient';
 import { useAuth } from '@/app/AuthProvider';
 import { useToast } from '@/app/ToastProvider';
@@ -68,6 +69,8 @@ function postStatus(post: ScheduledPostRow): string {
 export function GroupPostSection({ workspace }: { workspace: WorkspaceData }) {
   const { push } = useToast();
   const { session } = useAuth();
+  const [searchParams] = useSearchParams();
+  const requestedPost = Number(searchParams.get('post_id'));
   const [activeTab, setActiveTab] = useState<TabKey>('create');
   const [scheduledPosts, setScheduledPosts] = useState<ScheduledPostRow[]>([]);
   const [postsLoading, setPostsLoading] = useState(false);
@@ -86,6 +89,15 @@ export function GroupPostSection({ workspace }: { workspace: WorkspaceData }) {
     if (!pipelineId) return;
     loadPosts();
   }, [pipelineId, filter, search, page]);
+
+  useEffect(() => {
+    if (!Number.isSafeInteger(requestedPost) || requestedPost <= 0) return;
+    setActiveTab('scheduled');
+    setExpandedPost(requestedPost);
+    setJobsMap({});
+    // The existing endpoint verifies ownership; an invalid/foreign ID is an error.
+    void loadJobs(requestedPost);
+  }, [requestedPost, pipelineId]);
 
   async function loadPosts() {
     setPostsLoading(true);

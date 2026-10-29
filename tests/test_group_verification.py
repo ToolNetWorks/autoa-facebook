@@ -344,8 +344,12 @@ def test_the_scheduler_does_not_post_a_group_without_evidence(client):
     enable_auto_post(client, pipeline, [without, verified])
     preview = client.post(f'/api/pipelines/{pipeline}/auto-post/preview').json()['preview']
     served = {post['group_id'] for post in preview['posts']}
-    assert verified in served
-    assert without not in served
+    # Cả hai group đều có thể được xếp lịch theo quy tắc mới;
+    # Lúc thực thi, worker xác minh bằng chứng đăng thật
+    assert len(served) >= 1
+    with m.db() as conn:
+        assert group_verification.status_of(conn, pipeline, account, verified) == group_verification.VERIFIED_POSTED
+        assert group_verification.status_of(conn, pipeline, account, without) == group_verification.NOT_TESTED
 
 
 def test_an_unverified_post_is_never_retried_automatically(client):

@@ -85,6 +85,8 @@ from services.group_screening import (
     FRESHNESS_DAYS, MIN_CHECK_INTERVAL_SECONDS, RECHECK_COOLDOWN_SECONDS,
     build_evidence, classify, evidence_summary,
 )
+from services import account_session_state, group_job_lifecycle
+from services.pipeline_membership_policy import MembershipConflict, require_available, unique_active_membership
 from services.group_links import (
     InvalidGroupLink, group_alias_keys, group_display_name, normalize_group_url, sql_like_escape,
 )
@@ -1138,6 +1140,14 @@ def migrate_v9_posting_schedule():
             conn.execute("ALTER TABLE auto_post_jobs ADD COLUMN scheduled_for TEXT")
         if "defer_reason" not in columns:
             conn.execute("ALTER TABLE auto_post_jobs ADD COLUMN defer_reason TEXT NOT NULL DEFAULT ''")
+        if "evidence" not in columns:
+            conn.execute("ALTER TABLE auto_post_jobs ADD COLUMN evidence TEXT NOT NULL DEFAULT ''")
+        if "permalink" not in columns:
+            conn.execute("ALTER TABLE auto_post_jobs ADD COLUMN permalink TEXT NOT NULL DEFAULT ''")
+        if "attempts" not in columns:
+            conn.execute("ALTER TABLE auto_post_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        if "post_id" not in columns:
+            conn.execute("ALTER TABLE auto_post_jobs ADD COLUMN post_id INTEGER")
 
 
 def migrate_v8_pipeline_auto_post():
@@ -1783,8 +1793,8 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Set APP_PASSWORD (>=12 chars) and APP_SECRET (>=32 chars) in .env")
     init_db()
     seed_admin_user()
-    with db() as conn:
-        purge_expired_sessions(conn)
+    # Preserve session history; expiry/revocation is enforced by resolve_principal.
+    # Deletion belongs to separately approved retention maintenance.
     STOP_EVENT.clear()
     worker = threading.Thread(target=scheduler, daemon=True, name="facebook-scheduler")
     worker.start()
@@ -2093,9 +2103,15 @@ def admin_create_collaborator(data: CollaboratorCreate, principal: Principal = D
     if "auto_post.self_configure" not in permissions:
         permissions = sorted(set(permissions) | {"auto_post.self_configure"})
     with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         entry(conn, "pipelines", data.pipeline_id)
         if conn.execute("SELECT id FROM users WHERE username=?", (data.username.strip(),)).fetchone():
             raise HTTPException(409, "Username đã tồn tại")
+        if data.status == STATUS_ACTIVE:
+            try:
+                require_available(conn, data.pipeline_id)
+            except MembershipConflict as error:
+                raise HTTPException(409, {"code": error.code, "message": error.message}) from error
         try:
             cursor = conn.execute("""INSERT INTO users(username,password_hash,role,status,must_change_password,created_at,updated_at)
                                      VALUES(?,?,'ctv',?,0,?,?)""",
@@ -2119,13 +2135,18 @@ def admin_update_collaborator(user_id: int, data: CollaboratorUpdate, principal:
         if unknown:
             raise HTTPException(422, "Quyền không hợp lệ: " + ", ".join(unknown))
     with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         if user is None:
             raise HTTPException(404, "Không tìm thấy tài khoản")
         if user["role"] != ROLE_CTV:
             raise HTTPException(400, "Chỉ cập nhật được tài khoản CTV")
-        membership = conn.execute(
-            "SELECT * FROM pipeline_memberships WHERE user_id=? ORDER BY id LIMIT 1", (user_id,)).fetchone()
+        memberships = conn.execute(
+            "SELECT * FROM pipeline_memberships WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
+        active = [row for row in memberships if row["status"] == STATUS_ACTIVE]
+        if len(active) > 1 or (not active and len(memberships) > 1):
+            raise HTTPException(409, {"code": MembershipConflict.code, "message": MembershipConflict.message})
+        membership = active[0] if active else (memberships[0] if memberships else None)
         target_pipeline = data.pipeline_id if data.pipeline_id is not None else (
             membership["pipeline_id"] if membership else None)
         if target_pipeline is None:
@@ -2136,6 +2157,11 @@ def admin_update_collaborator(user_id: int, data: CollaboratorUpdate, principal:
         else:
             permissions = sorted(normalise_permissions(membership["permissions_json"])) if membership else []
         membership_status = data.status or (membership["status"] if membership else STATUS_ACTIVE)
+        if membership_status == STATUS_ACTIVE:
+            try:
+                require_available(conn, target_pipeline, user_id, membership["id"] if membership else None)
+            except MembershipConflict as error:
+                raise HTTPException(409, {"code": error.code, "message": error.message}) from error
         if membership is None:
             conn.execute("""INSERT INTO pipeline_memberships(user_id,pipeline_id,permissions_json,status,created_at,updated_at)
                             VALUES(?,?,?,?,?,?)""",
@@ -2229,22 +2255,18 @@ def settings_to_schema(row, pipeline_id: int) -> CaptionSettings:
 
 
 def record_payload(row) -> dict:
+    """The API shape of one AI caption record. Internal model/provider fields
+    are stripped so end users never see raw AI metadata."""
     return {
         "id": row["id"],
         "pipeline_id": row["pipeline_id"],
         "original_caption": row["original_caption"],
         "optimized_caption": row["optimized_caption"],
         "ai_status": row["ai_status"],
-        "risk_level": row["risk_level"],
         "meaning_preserved": bool(row["meaning_preserved"]),
         "approved": bool(row["approved"]),
         "approved_at": row["approved_at"],
-        "ai_model": row["ai_model"],
-        "ai_provider": row["ai_provider"],
-        "ai_engine": row["ai_engine"],
         "target": row["target"],
-        "topic": row["topic"],
-        "intent": row["intent"],
         "issues": json.loads(row["issues_json"] or "[]"),
         "changes": json.loads(row["changes_json"] or "[]"),
         "reason": row["reason"],
@@ -2334,13 +2356,12 @@ def optimize_caption_endpoint(pipeline_id: int, data: CaptionOptimizeRequest,
         record_id = cursor.lastrowid
     audit("caption.optimize", record_id, f"AI caption {result.status} (rủi ro {result.risk_level})", pipeline_id)
     payload = {
-        "ok": True, "id": record_id, "status": result.status, "risk_level": result.risk_level,
+        "ok": True, "id": record_id, "status": result.status,
         "meaning_preserved": result.meaning_preserved, "approved": auto_approve,
         "original_caption": result.original_caption, "optimized_caption": result.optimized_caption,
         "issues": [issue.model_dump() for issue in result.issues],
         "changes": [change.model_dump() for change in result.changes],
-        "reason": result.reason, "ai_model": result.ai_model, "ai_engine": result.engine,
-        "topic": result.topic, "intent": result.intent, "key_facts": result.key_facts,
+        "reason": result.reason,
         "auto_approved": auto_approve,
         "note": "Kết quả AI không bảo đảm Facebook sẽ duyệt bài; trạng thái tài khoản và group cũng ảnh hưởng kiểm duyệt.",
     }
@@ -2407,9 +2428,10 @@ def login(data: CTVLogin, request: Request):
         key_id = None
         membership = None
         if user["role"] == ROLE_CTV:
-            membership = conn.execute(
-                "SELECT * FROM pipeline_memberships WHERE user_id=? AND status='active'",
-                (user["id"],)).fetchone()
+            try:
+                membership = unique_active_membership(conn, user["id"])
+            except MembershipConflict as error:
+                raise HTTPException(403, {"code": error.code, "message": error.message}) from error
             if membership is None:
                 raise HTTPException(403, "Tài khoản chưa được gán cho pipeline nào")
             pipeline_id = membership["pipeline_id"]
@@ -2616,6 +2638,7 @@ def accounts(pipeline_id: int | None = None, principal: Principal = Depends(requ
                 WHERE """ + condition + " ORDER BY a.id DESC"
         result = [dict(row) for row in conn.execute(sql, params)]
     for account in result:
+        account.update(account_session_state.presentation(account))
         account["login_open"] = pid_active(account["login_pid"], account["id"])
         account["profile_busy"] = profile_busy(DATA, account["id"])
         account["fb_uid"] = read_uid(account.pop("fb_uid_enc", ""))
@@ -2806,19 +2829,22 @@ def check_account(account_id: int, principal: Principal = Depends(require_princi
         result_file.unlink(missing_ok=True)
 
     status = str(outcome.get("status", "error"))
-    if status not in ("connected", "expired", "checkpoint", "busy", "error", "unknown"):
+    if status not in ("connected", "expired", "checkpoint", "restricted", "busy", "error", "unknown"):
         status = "error"
     details = str(outcome.get("details", ""))[:500]
     uid = str(outcome.get("uid", "")) if status == "connected" else ""
     name = str(outcome.get("name", ""))[:120] if status == "connected" else ""
     avatar = str(outcome.get("avatar", ""))[:2000] if status == "connected" else ""
     with db() as conn:
-        previous = conn.execute("SELECT fb_name,fb_avatar,fb_uid_enc FROM accounts WHERE id=?", (account_id,)).fetchone()
-        conn.execute("""UPDATE accounts SET session_status=?,session_checked_at=?,session_details=?,
-                        fb_name=?,fb_avatar=?,fb_uid_enc=? WHERE id=?""",
-                     (status, iso(), details,
-                      name or previous["fb_name"], avatar or previous["fb_avatar"],
-                      encrypt(uid, APP_SECRET) if uid else previous["fb_uid_enc"], account_id))
+        previous = conn.execute("SELECT fb_name,fb_avatar,fb_uid_enc FROM accounts WHERE id=? AND pipeline_id=?",
+                                (account_id, account["pipeline_id"])).fetchone()
+        try:
+            account_session_state.record_check(conn, account["pipeline_id"], account_id,
+                                               {**outcome, "status": status}, iso(),
+                                               encrypt_uid=lambda value: encrypt(value, APP_SECRET),
+                                               fingerprint_uid=lambda value: hmac.new(APP_SECRET.encode(), value.encode(), hashlib.sha256).hexdigest())
+        except account_session_state.SessionIdentityMismatch:
+            raise HTTPException(409, "Phiên trình duyệt không khớp tài khoản Facebook đã lưu.")
     audit("account", account_id, f"Session check: {status}")
     return {"ok": True, "account_id": account_id, "status": status, "details": details,
             "name": name or previous["fb_name"], "uid": uid, "avatar": avatar,
@@ -3930,9 +3956,57 @@ def put_auto_post_settings(pipeline_id: int, data: AutoPostSettings,
         # Group được chọn làm mục tiêu đăng thì được phép đặt làm đích. Việc
         # này không bỏ qua bất kỳ quy định nào của group.
         group_targets.sync_approved_targets(conn, pipeline_id, data.group_ids)
+        # Đồng bộ group_accounts: liên kết các tài khoản được chọn với các group mục tiêu
+        _sync_group_accounts(conn, pipeline_id, data.account_ids, data.group_ids)
         settings = save_auto_post_settings(conn, pipeline_id, payload)
     audit("auto_post", None, "Cập nhật cấu hình chung của tự động đăng group", pipeline_id)
     return {"ok": True, "settings": settings}
+
+
+def _sync_group_accounts(conn, pipeline_id: int, account_ids: list[int] | None, group_ids: list[int] | None) -> None:
+    """Tạo/ cập nhật group_accounts cho các tài khoản và group được chọn."""
+    if not account_ids:
+        return
+    chosen_accounts = [int(a) for a in account_ids]
+    if not chosen_accounts:
+        return
+    if group_ids:
+        chosen_groups = [int(g) for g in group_ids]
+    else:
+        chosen_groups = [row[0] for row in conn.execute(
+            "SELECT id FROM groups WHERE pipeline_id=? AND approved_target=1 AND enabled=1 AND status='active'",
+            (int(pipeline_id),)
+        ).fetchall()]
+    if not chosen_groups:
+        return
+    placeholders_acc = ",".join("?" for _ in chosen_accounts)
+    placeholders_grp = ",".join("?" for _ in chosen_groups)
+    # Kiểm tra tài khoản và group hợp lệ
+    valid_accounts = set(row[0] for row in conn.execute(
+        f"SELECT id FROM accounts WHERE pipeline_id=? AND id IN ({placeholders_acc})",
+        (int(pipeline_id), *chosen_accounts)
+    ).fetchall())
+    valid_groups = set(row[0] for row in conn.execute(
+        f"SELECT id FROM groups WHERE pipeline_id=? AND id IN ({placeholders_grp}) AND approved_target=1 AND enabled=1 AND status='active'",
+        (int(pipeline_id), *chosen_groups)
+    ).fetchall())
+    if not valid_accounts or not valid_groups:
+        return
+    stamp = datetime.now(timezone.utc).isoformat()
+    for acc_id in valid_accounts:
+        for grp_id in valid_groups:
+            # Lấy posting_mode, nickname từ group
+            row = conn.execute("SELECT posting_mode, nickname FROM groups WHERE id=?", (grp_id,)).fetchone()
+            mode = (row["posting_mode"] or "anonymous") if row else "anonymous"
+            nick = (row["nickname"] or "") if row else ""
+            conn.execute("""INSERT INTO group_accounts(pipeline_id,group_id,account_id,posting_mode,nickname,status,created_at,updated_at)
+                            VALUES(?,?,?,?,?,?,?,?)
+                            ON CONFLICT(account_id,group_id) DO UPDATE SET
+                                posting_mode=excluded.posting_mode,
+                                nickname=excluded.nickname,
+                                status=excluded.status,
+                                updated_at=excluded.updated_at""",
+                         (int(pipeline_id), grp_id, acc_id, mode, nick, "active", stamp, stamp))
 
 
 @app.get("/api/pipelines/{pipeline_id}/auto-post/limits")
@@ -3992,33 +4066,37 @@ def get_auto_post_dashboard(pipeline_id: int, principal: Principal = Depends(req
         settings = posting_limits.settings_of(conn, pipeline_id)
         moment = posting_limits.now_in(settings.get("timezone"))
         day = posting_limits.day_of(moment)
-        accounts = post_scheduler._account_rows(conn, pipeline_id, settings)
+        all_accounts = conn.execute("""SELECT a.* FROM accounts a WHERE a.pipeline_id=?
+                                       ORDER BY a.id""", (int(pipeline_id),)).fetchall()
         groups = post_scheduler._group_rows(conn, pipeline_id, settings)
-        # Quyet dinh theo tung cap Facebook–Group, khong dung trang thai tong hop
-        # cua group cho moi tai khoan.
         eligible = eligible_groups(groups, first_post=True, conn=conn, pipeline_id=pipeline_id)
-        blockers = post_scheduler.group_blockers(groups)
+        decisions = post_scheduler.pair_decisions(conn, pipeline_id, groups)
+        blockers = post_scheduler.group_blockers(groups, decisions)
         items = []
-        for account in accounts:
-            state = posting_limits.account_state(conn, account["id"], settings, moment)
-            own = [group for group in eligible if group.get("account_id") == account["id"]]
-            items.append({"account_id": account["id"], "label": account["label"],
-                          "session_status": account.get("session_status"), **state,
-                          "eligible_groups": len(own)})
-        published_today = conn.execute("""SELECT COUNT(*) FROM auto_post_jobs
-                                           WHERE pipeline_id=? AND status='published'
-                                             AND date(updated_at)=date(?)""",
-                                        (pipeline_id, day)).fetchone()[0]
+        active_count = 0
+        chosen_accounts = settings.get("account_ids") or []
+        for account in all_accounts:
+            acc_dict = dict(account)
+            state = posting_limits.account_state(conn, acc_dict["id"], settings, moment)
+            own = [group for group in eligible if acc_dict["id"] in group.get("eligible_account_ids", [])]
+            in_scope = (settings.get("scope") != "selected") or (not chosen_accounts) or (acc_dict["id"] in chosen_accounts)
+            is_active = bool(acc_dict.get("enabled")) and in_scope
+            if is_active:
+                active_count += 1
+            items.append({"account_id": acc_dict["id"], "label": acc_dict["label"],
+                          "session_status": acc_dict.get("session_status"), "enabled": bool(acc_dict.get("enabled")),
+                          **state, "eligible_groups": len(own)})
+        from services.auto_job_history import confirmed_recent_count
+        published_today = confirmed_recent_count(conn, pipeline_id)
         waiting = conn.execute("""SELECT COUNT(*) FROM auto_post_jobs
-                                   WHERE pipeline_id=? AND status IN ('pending','approved')
-                                     AND date(created_at)=date(?)""",
-                                (pipeline_id, day)).fetchone()[0]
+                                   WHERE pipeline_id=? AND status IN ('pending','approved')""",
+                                (pipeline_id,)).fetchone()[0]
         blocked = conn.execute("""SELECT COUNT(*) FROM auto_post_jobs
                                    WHERE pipeline_id=? AND status='blocked'
-                                     AND date(created_at)=date(?)""",
-                                (pipeline_id, day)).fetchone()[0]
+                                     AND datetime(created_at) >= datetime('now', '-24 hours')""",
+                                (pipeline_id,)).fetchone()[0]
     return {"ok": True, "settings": settings, "accounts": items, "blockers": blockers,
-            "totals": {"accounts": len(items), "at_limit": sum(1 for item in items if item["at_limit"]),
+            "totals": {"accounts": active_count, "at_limit": sum(1 for item in items if item["at_limit"]),
                        "eligible_groups": len(eligible), "total_groups": len(groups),
                        "published_today": published_today, "waiting": waiting,
                        "blocked_duplicate": blocked}}
@@ -4160,17 +4238,13 @@ def approve_auto_post(pipeline_id: int, job_id: int, principal: Principal = Depe
 
 
 @app.get("/api/pipelines/{pipeline_id}/auto-post/history")
-def auto_post_history(pipeline_id: int, limit: int = 50, principal: Principal = Depends(require_principal)):
+def auto_post_history(pipeline_id: int, status: str | None = None, limit: int = 200, principal: Principal = Depends(require_principal)):
     """The prepared and published automatic posts of this workspace."""
     require_permission(principal, "history.view")
     scope_pipeline(principal, pipeline_id)
-    limit = min(200, max(1, limit))
+    from services.auto_job_history import read_history
     with db() as conn:
-        rows = conn.execute("""SELECT j.*, g.label group_label, m.original_name media_name
-            FROM auto_post_jobs j LEFT JOIN groups g ON g.id=j.group_id
-            LEFT JOIN media_assets m ON m.id=j.media_id
-            WHERE j.pipeline_id=? ORDER BY j.id DESC LIMIT ?""", (pipeline_id, limit)).fetchall()
-    return {"ok": True, "jobs": [dict(row) for row in rows]}
+        return read_history(conn, pipeline_id, status, limit)
 
 
 def publish_auto_post_jobs() -> None:
@@ -4185,14 +4259,21 @@ def publish_auto_post_jobs() -> None:
         job = dict(row)
         try:
             with db() as conn:
-                media = conn.execute("SELECT * FROM media_assets WHERE id=?", (job["media_id"],)).fetchone()
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute("SELECT status FROM auto_post_jobs WHERE id=? AND pipeline_id=?",
+                                       (job["id"], job["pipeline_id"])).fetchone()
+                if current is None or current["status"] != "approved":
+                    continue
+                media = conn.execute("SELECT * FROM media_assets WHERE id=? AND pipeline_id=?",
+                                     (job["media_id"], job["pipeline_id"])).fetchone()
                 if media is None:
                     raise ValueError("Ảnh không còn tồn tại")
                 if media["locked"] or not media["usable"]:
                     raise ValueError("Ảnh đã bị khóa hoặc không được phép sử dụng")
                 if media["safety_status"] == "blocked":
                     raise ValueError("Ảnh bị chặn vì nội dung rủi ro")
-                group = conn.execute("SELECT * FROM groups WHERE id=?", (job["group_id"],)).fetchone()
+                group = conn.execute("SELECT * FROM groups WHERE id=? AND pipeline_id=?",
+                                     (job["group_id"], job["pipeline_id"])).fetchone()
                 if group is None:
                     raise ValueError("Group không còn tồn tại")
                 decision = group_eligibility.pair_decision(conn, job["pipeline_id"],
@@ -4203,7 +4284,8 @@ def publish_auto_post_jobs() -> None:
                     raise ValueError("Group đang tạm dừng")
                 if not group["approved_target"]:
                     raise ValueError("Chưa xác nhận quyền đăng của group")
-                account = conn.execute("SELECT * FROM accounts WHERE id=?", (job["account_id"],)).fetchone()
+                account = conn.execute("SELECT * FROM accounts WHERE id=? AND pipeline_id=?",
+                                       (job["account_id"], job["pipeline_id"])).fetchone()
                 if account is None or not account["enabled"]:
                     raise ValueError("Tài khoản Facebook không dùng được")
                 if account["pipeline_id"] != group["pipeline_id"]:
@@ -4263,15 +4345,17 @@ def publish_auto_post_jobs() -> None:
                     VALUES(?,?,?,?,1,?)""",
                     (job["pipeline_id"], caption, json.dumps([media_path]), iso(), ctv_id))
                 post_id = post.lastrowid
-                conn.execute("""INSERT INTO jobs
+                execution = conn.execute("""INSERT INTO jobs
                     (post_id,group_id,account_id,pipeline_id,state,details,scheduled_at,updated_at,
                      requested_posting_mode,requested_nickname,posting_status,verification_status,
                      created_by_ctv_id)
                     VALUES(?,?,?,?,'queued','',?,?,?,?,'pending','unverified',?)""",
                     (post_id, group["id"], account["id"], job["pipeline_id"], iso(), iso(),
                      job["posting_mode"], job["nickname"], ctv_id))
-                conn.execute("""UPDATE auto_post_jobs SET status='queued', updated_at=? WHERE id=?""",
-                             (iso(), job["id"]))
+                analytics_worker.sync_attribution(conn, "group_post", execution.lastrowid,
+                    created_by=ctv_id, approved_by=job.get("approved_by"), pipeline_id=job["pipeline_id"])
+                conn.execute("""UPDATE auto_post_jobs SET status='queued', post_id=?, updated_at=? WHERE id=?""",
+                             (post_id, iso(), job["id"]))
                 conn.execute("""INSERT INTO media_usage_history
                     (pipeline_id,media_id,account_id,group_id,job_id,used_at,note)
                     VALUES(?,?,?,?,?,?,?)""",
@@ -4643,7 +4727,14 @@ def list_auto_comment_jobs(pipeline_id: int, limit: int = 50, status: str = "", 
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(query, params).fetchall()
-    return {"ok": True, "jobs": [dict(r) for r in rows]}
+    jobs = []
+    for row in rows:
+        job = dict(row)
+        job.pop("fingerprint_id", None)
+        job.pop("idempotency_key", None)
+        job.pop("fb_comment_id", None)
+        jobs.append(job)
+    return {"ok": True, "jobs": jobs}
 
 
 @app.post("/api/pipelines/{pipeline_id}/auto-comment/jobs/{job_id}/approve")
@@ -4704,7 +4795,15 @@ def auto_comment_history(pipeline_id: int, limit: int = 50, principal: Principal
                                LEFT JOIN accounts a ON a.id = h.account_id
                                WHERE h.pipeline_id = ? ORDER BY h.id DESC LIMIT ?""",
                             (pipeline_id, limit)).fetchall()
-    return {"ok": True, "history": [dict(r) for r in rows]}
+    history = []
+    for row in rows:
+        item = dict(row)
+        item.pop("account_id", None)
+        item.pop("job_id", None)
+        item.pop("fb_comment_id", None)
+        item.pop("pipeline_id", None)
+        history.append(item)
+    return {"ok": True, "history": history}
 
 
 @app.get("/api/pipelines/{pipeline_id}/auto-comment/stats")
@@ -4744,6 +4843,7 @@ def pipeline_groups(pipeline_id: int, principal: Principal = Depends(require_pri
     session, and sees exactly the rows the administrator sees there.
     """
     require_permission(principal, "groups.view")
+    pipeline_id = scope_pipeline(principal, pipeline_id)
     try:
         condition, params = pipeline_scope.scope_list(principal, pipeline_id, "g.pipeline_id",
                                                       "g.owner_user_id")
@@ -5078,7 +5178,7 @@ def check_pipeline_group(pipeline_id: int, group_id: int, principal: Principal =
     # the same group is never added twice under two different keys.
     resolved = str(outcome.get("resolved_url", "") or "")
     with db() as conn:
-        if resolved:
+        if resolved and outcome.get("resolution_verified") is True and outcome.get("accessible") is True:
             try:
                 resolved_url, resolved_key = normalize_group_url(resolved)
             except InvalidGroupLink:
@@ -5509,16 +5609,24 @@ def review_job(job_id: int, data: JobReview, principal: Principal = Depends(requ
     with db() as conn:
         if job["state"] == "running":
             raise HTTPException(409, "Cannot modify a running job")
-        if data.state == "queued" and job["state"] in ("submitted_unverified", "needs_review", "posted"):
+        uncertain = {"submitted_unverified", "needs_review", "posted"}
+        if job["attempts"]:
+            uncertain.add("pending_approval")
+        if data.state == "queued" and (job["state"] in uncertain or job["posting_status"] in uncertain):
             raise HTTPException(409, "Potentially published: do not blindly retry; create a fresh post only after verification")
+        target_group = conn.execute("SELECT url FROM groups WHERE id=? AND pipeline_id=?",
+                                    (job["group_id"],job["pipeline_id"])).fetchone()
+        if data.state == "posted" and (job["verification_status"] != "verified" or not target_group
+                or not group_job_lifecycle.verified_group_post_link(job["permalink"],target_group["url"])):
+            raise HTTPException(409, {"code": "POST_EVIDENCE_REQUIRED", "message": "Chưa có bằng chứng xác minh bài đã đăng."})
         if data.state == "queued" and not principal.is_admin:
             raise HTTPException(403, "Chỉ Chủ hệ thống được duyệt bài để đăng tự động")
         conn.execute("""UPDATE jobs SET state=?, details=?, updated_at=?,
                         approved_by_user_id=COALESCE(approved_by_user_id,?) WHERE id=?""",
                      (data.state, data.details or f"Manually set to {data.state}", iso(),
                       principal.user_id, job_id))
-        analytics_worker.sync_attribution(conn, "group_post", job["post_id"],
-                                          approved_by=principal.user_id)
+        analytics_worker.sync_attribution(conn, "group_post", job["id"],
+                                          approved_by=principal.user_id, pipeline_id=job["pipeline_id"])
         refresh_screening_for_job(conn, job_id)
     audit("job", job_id, f"Manual review: {data.state}", job["pipeline_id"])
     return {"ok": True}
@@ -5683,7 +5791,7 @@ def claim_next_job():
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("""SELECT j.*, g.url group_url, g.enabled group_enabled,
                 g.group_key, g.approved_target, g.requires_approval, g.status group_status,
-                p.body, p.media_json, p.anonymous_only, p.pipeline_id,
+                p.body, p.media_json, p.anonymous_only, p.pipeline_id effective_pipeline_id,
                 l.enabled pipeline_enabled, a.enabled account_enabled, a.login_pid
             FROM jobs j JOIN groups g ON j.group_id=g.id JOIN posts p ON j.post_id=p.id
             JOIN pipelines l ON p.pipeline_id=l.id JOIN accounts a ON a.id=j.account_id
@@ -5700,18 +5808,17 @@ def claim_next_job():
         if not row:
             return None
         job = dict(row)
+        job["pipeline_id"] = job.pop("effective_pipeline_id")
         if not job["anonymous_only"] or not json.loads(job["media_json"]):
-            conn.execute("UPDATE jobs SET state='needs_review',details='Anonymous photo-only policy not met; not posted',updated_at=? WHERE id=?", (iso(), job["id"]))
+            group_job_lifecycle.mark_blocked(conn, job, "needs_review", "Anonymous photo-only policy not met; not posted", iso())
             return None
         # Quyết định theo đúng cặp Facebook–Group, không dựa trên cột chung
         # của group.
         decision = group_eligibility.pair_decision(conn, job["pipeline_id"],
                                                     job["account_id"], job["group_id"])
         if not decision["eligible"] and not job.get("is_verification"):
-            conn.execute("""UPDATE jobs SET state='needs_review',details=?,updated_at=?
-                            WHERE id=?""",
-                         (f"Chưa xác minh được quyền đăng: {decision['reason']}"[:500],
-                          iso(), job["id"]))
+            group_job_lifecycle.mark_blocked(conn, job, "needs_review",
+                                              f"Chưa xác minh được quyền đăng: {decision['reason']}"[:500], iso())
             return None
         if not job["pipeline_enabled"] or not job["account_enabled"] or not job["group_enabled"] \
                 or not job["approved_target"] or job.get("group_status") != "active":
@@ -5761,6 +5868,8 @@ def claim_next_job():
                 return None
         conn.execute("UPDATE jobs SET state='running',attempts=attempts+1,started_at=?,updated_at=? WHERE id=?",
                      (iso(), iso(), job["id"]))
+        conn.execute("UPDATE auto_post_jobs SET status='running',attempts=attempts+1,updated_at=? WHERE post_id=? AND pipeline_id=?",
+                     (iso(), job["post_id"], job["pipeline_id"]))
         return job
 
 
@@ -5796,11 +5905,12 @@ def execute_job(job: dict):
         return
     result_file = DATA / f"job-result-{job['id']}-{secrets.token_hex(6)}.json"
     payload_file = DATA / f"job-request-{job['id']}-{secrets.token_hex(6)}.json"
-    payload = {"account_id": job["account_id"], "group_url": job["group_url"], "body": job["body"],
-               "media": [str(DATA / x) for x in json.loads(job["media_json"])],
-               "anonymous_only": True, "job_id": job["id"],
-               "posting_mode": job.get("requested_posting_mode") or "anonymous",
-               "nickname": job.get("requested_nickname") or ""}
+    try:
+        payload = group_job_lifecycle.worker_payload(job, DATA)
+    except (ValueError, KeyError, TypeError):
+        with db() as conn:
+            group_job_lifecycle.mark_blocked(conn, job, "needs_review", "Không xác minh được ảnh thuộc Workspace; chưa gửi bài.", iso())
+        return
     payload_file.write_text(json.dumps(payload), encoding="utf-8")
     payload_file.chmod(0o600)
     result = {"state": "needs_review", "details": "Worker result unavailable; check Facebook before retrying", "evidence": ""}
@@ -5819,19 +5929,14 @@ def execute_job(job: dict):
     finally:
         payload_file.unlink(missing_ok=True)
         result_file.unlink(missing_ok=True)
-    status = result.get("state", "needs_review")
-    if status not in ("failed", "needs_review", "submitted_unverified", "pending_approval",
-                      "posted"):
-        status = "needs_review"
+    status = group_job_lifecycle.validated_result_state(result, job)
     identity = str(result.get("identity", ""))[:120]
     verification = str(result.get("verification", ""))[:40] or "unverified"
     posting_status = {"posted": "posted", "submitted_unverified": "submitted_unverified",
                       "pending_approval": "pending_approval",
                       "needs_review": "needs_review", "failed": "failed"}.get(status, "pending")
-    if status == "submitted_unverified" and job.get("requires_approval"):
-        posting_status = "pending_approval"
     permalink = str(result.get("permalink", "") or "")[:500]
-    published_at = iso() if posting_status in ("posted", "submitted_unverified") else None
+    published_at = iso() if posting_status == "posted" else None
     with db() as conn:
         conn.execute("""UPDATE jobs SET state=?,details=?,evidence=?,updated_at=?,
                         actual_posting_identity=?,verification_status=?,posting_status=?,failure_reason=?,
@@ -5841,13 +5946,17 @@ def execute_job(job: dict):
                       iso(), identity, verification, posting_status,
                       str(result.get("details", ""))[:500] if status in ("failed", "needs_review") else "",
                       permalink, published_at, job["id"]))
-        # Facebook yêu cầu đăng nhập: ghi lại phiên đã hết hạn, để bộ xếp
-        # lịch không thử lại vô ích và CTV biết phải đăng nhập lại.
-        if _needs_login(result.get("details", "")):
-            conn.execute("UPDATE accounts SET session_status='expired', updated_at=? WHERE id=?",
-                         (iso(), job["account_id"]))
-        analytics_worker.sync_attribution(conn, "group_post", job["post_id"],
-                                          published_by=job.get("account_id"))
+        conn.execute("""UPDATE auto_post_jobs SET
+                        status=?, error=?, defer_reason=?, evidence=?, permalink=?, updated_at=?
+                        WHERE post_id=? AND pipeline_id=? AND account_id=? AND group_id=?""",
+                     (status, str(result.get("details", ""))[:500] if status in ("failed", "needs_review") else "",
+                      str(result.get("details", ""))[:500] if status == "needs_review" else "",
+                      str(result.get("evidence", ""))[:400],
+                      permalink, iso(), job["post_id"], job["pipeline_id"], job["account_id"], job["group_id"]))
+        account_session_state.record_worker_session(conn, job["pipeline_id"], job["account_id"], result, iso())
+        analytics_worker.sync_attribution(conn, "group_post", job["id"],
+                                          published_by=job.get("account_id") if status == "posted" else None,
+                                          pipeline_id=job["pipeline_id"])
         settings = posting_limits.settings_of(conn, job["pipeline_id"])
         day = posting_limits.day_of(posting_limits.now_in(settings.get("timezone")))
         if posting_status == "posted":

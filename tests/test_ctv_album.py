@@ -95,7 +95,7 @@ def test_a_passing_picture_becomes_usable_without_any_approval(client, pictures,
 
     item = item_of(client, pipeline, media_id)
     assert item['state'] == media_status.READY
-    assert item['state_label'] == 'Khả dụng'
+    assert item['state_label'] == 'Đạt'
     assert item['usable'] is True
     assert item['reason']
     assert item['can_retry'] is False
@@ -144,7 +144,7 @@ def test_a_blocked_picture_cannot_be_used(client, pictures, monkeypatch):
 
     item = item_of(client, pipeline, media_id)
     assert item['state'] == media_status.BLOCKED
-    assert item['state_label'] == 'Bị chặn'
+    assert item['state_label'] == 'Không đạt'
     assert item['usable'] is False
     assert item['can_be_usable'] is False
 
@@ -160,7 +160,7 @@ def test_a_failed_check_is_not_reported_as_needs_review(client, pictures, monkey
 
     item = item_of(client, pipeline, media_id)
     assert item['state'] == media_status.CHECK_FAILED
-    assert item['state_label'] == 'Kiểm tra thất bại'
+    assert item['state_label'] == 'Lỗi'
     assert item['usable'] is False
     assert item['can_retry'] is True
     assert item['can_be_usable'] is False

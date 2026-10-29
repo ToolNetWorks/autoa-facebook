@@ -122,8 +122,6 @@ def _account_rows(conn, pipeline_id: int, settings: dict) -> list[dict]:
             continue
         if not item.get("enabled"):
             continue
-        if (item.get("session_status") or "") in ("expired", "error", "invalid", "revoked"):
-            continue
         accounts.append(item)
     return accounts
 
@@ -252,12 +250,19 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
         if not time_windows.is_inside_window(scheduled_for, schedule):
             notes.append(f"{chosen_group.get('label')}: thời điểm đăng nằm ngoài khung giờ")
             continue
-        candidates = [item for item in media if item["id"] not in used_media]
-        chosen = select_media(candidates, settings.get("topic", ""))
-        picture = chosen.get("media")
-        if not picture:
+        if not media:
             notes.append("Album chưa có ảnh đủ điều kiện an toàn")
             break
+        candidates = [item for item in media if item["id"] not in used_media]
+        if not candidates:
+            candidates = list(media)
+        chosen = select_media(candidates, settings.get("topic", ""))
+        picture = chosen.get("media")
+        if not picture and len(candidates) < len(media):
+            picture = select_media(media, settings.get("topic", "")).get("media")
+        if not picture:
+            notes.append(f"{chosen_group.get('label')}: chưa có ảnh phù hợp")
+            continue
         caption_result = create_caption(picture.get("description") or "",
                                         list(picture.get("tags") or []),
                                         settings.get("topic", ""), provider_config)
@@ -271,6 +276,10 @@ def plan(conn, pipeline_id: int, moment: datetime | None = None,
         if was_locked:
             caption_result["caption"] = caption_with_lock
             caption_result.setdefault("reasons", []).append(f"Destination Lock: {lock_msg}")
+        used_pairs = {(j["group_id"], j["media_id"]) for j in jobs}
+        if (chosen_group["id"], picture["id"]) in used_pairs:
+            notes.append(f"{chosen_group.get('label')}: ảnh này đã được xếp lịch cho group hôm nay")
+            continue
         verdict = duplicate_guard.check(conn, pipeline_id, picture,
                                         caption_result.get("caption", ""),
                                         chosen_group["id"], account_id)
@@ -341,9 +350,9 @@ def allocate(conn, pipeline_id: int, moment: datetime | None = None,
         sha = media["sha256"] if media else ""
         signature = media["signature"] if media else ""
         duplicate_guard.record(conn, pipeline_id, duplicate_guard.KIND_MEDIA_EXACT,
-                               duplicate_guard.media_fingerprint(sha), job["media_id"], job_id)
+                               duplicate_guard.media_fingerprint(sha), job["media_id"], job_id, job["group_id"])
         duplicate_guard.record(conn, pipeline_id, duplicate_guard.KIND_MEDIA_NEAR,
-                               duplicate_guard.near_fingerprint(signature), job["media_id"], job_id)
+                               duplicate_guard.near_fingerprint(signature), job["media_id"], job_id, job["group_id"])
         duplicate_guard.record(conn, pipeline_id, duplicate_guard.KIND_CAPTION,
                                duplicate_guard.caption_fingerprint(job["caption"]),
                                job["media_id"], job_id, job["group_id"])

@@ -19,27 +19,56 @@ def _now() -> str:
 
 
 def sync_attribution(conn, content_type: str, post_id: int, created_by=None,
-                     approved_by=None, published_by=None) -> None:
-    """Ghi lại ai tạo, ai duyệt và tài khoản nào đã đăng một bài."""
-    row = conn.execute("""SELECT pipeline_id FROM jobs WHERE id=? AND ?='group_post'""",
-                        (post_id, content_type)).fetchone()
-    if row is None:
-        row = conn.execute("""SELECT pipeline_id FROM manual_tasks WHERE id=? AND ?='reel'""",
-                            (post_id, content_type)).fetchone()
-    if row is None:
-        return
-    pipeline_id = row["pipeline_id"]
+                     approved_by=None, published_by=None, *, pipeline_id=None) -> bool:
+    """Attribute an execution ID (jobs.id for Groups), never a source posts.id.
+
+    Invalid legacy associations are left untouched for an approved repair. Refusal
+    must not roll back a Facebook result already observed by the caller.
+    """
+    if content_type == "group_post":
+        row = conn.execute("""SELECT j.pipeline_id,j.account_id,j.state status,
+            j.verification_status,j.permalink FROM jobs j
+            JOIN posts p ON p.id=j.post_id AND p.pipeline_id=j.pipeline_id
+            JOIN groups g ON g.id=j.group_id AND g.pipeline_id=j.pipeline_id
+            JOIN accounts a ON a.id=j.account_id AND a.pipeline_id=j.pipeline_id
+            WHERE j.id=?""", (post_id,)).fetchone()
+    elif content_type == "reel":
+        row = conn.execute("""SELECT t.pipeline_id,t.account_id,t.status,
+            'unverified' verification_status,t.permalink FROM manual_tasks t
+            JOIN accounts a ON a.id=t.account_id AND a.pipeline_id=t.pipeline_id
+            WHERE t.id=? AND t.task_type='reel'""", (post_id,)).fetchone()
+    else:
+        return False
+    if row is None or (pipeline_id is not None and row["pipeline_id"] != pipeline_id):
+        return False
+    tenant = row["pipeline_id"]
+    if created_by is not None and not conn.execute("""SELECT 1 FROM pipeline_memberships
+        WHERE user_id=? AND pipeline_id=?""", (created_by, tenant)).fetchone():
+        return False
+    if approved_by is not None and not conn.execute("""SELECT 1 FROM users
+        WHERE id=? AND role='admin'""", (approved_by,)).fetchone():
+        return False
+    if published_by is not None:
+        if (published_by != row["account_id"] or row["status"] != "posted"
+                or row["verification_status"] != "verified" or not row["permalink"]):
+            return False
+    existing = conn.execute("""SELECT pipeline_id,published_by_account_id FROM post_attribution
+        WHERE content_type=? AND post_id=?""", (content_type, post_id)).fetchone()
+    if existing and (existing["pipeline_id"] != tenant or
+            (existing["published_by_account_id"] is not None and
+             existing["published_by_account_id"] != row["account_id"])):
+        LOG.warning("attribution_conflict content_type=%s execution_id=%s", content_type, post_id)
+        return False
     conn.execute("""INSERT INTO post_attribution
         (content_type,post_id,pipeline_id,created_by_ctv_id,approved_by_user_id,
-         published_by_account_id,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?)
+         published_by_account_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
         ON CONFLICT(content_type,post_id) DO UPDATE SET
-            created_by_ctv_id=COALESCE(excluded.created_by_ctv_id, post_attribution.created_by_ctv_id),
-            approved_by_user_id=COALESCE(excluded.approved_by_user_id, post_attribution.approved_by_user_id),
-            published_by_account_id=COALESCE(excluded.published_by_account_id, post_attribution.published_by_account_id),
+            created_by_ctv_id=COALESCE(excluded.created_by_ctv_id,post_attribution.created_by_ctv_id),
+            approved_by_user_id=COALESCE(excluded.approved_by_user_id,post_attribution.approved_by_user_id),
+            published_by_account_id=COALESCE(excluded.published_by_account_id,post_attribution.published_by_account_id),
             updated_at=excluded.updated_at""",
-                 (content_type, post_id, pipeline_id, created_by, approved_by, published_by,
-                  _now(), _now()))
+        (content_type,post_id,tenant,created_by,approved_by,published_by,_now(),_now()))
+    return True
 
 
 def enqueue_published(conn) -> int:
@@ -78,9 +107,9 @@ def collect_pending(conn, limit: int = 5) -> int:
         content_type = row["content_type"]
         post_id = row["post_id"]
         if content_type == "group_post":
-            item = conn.execute("SELECT account_id, permalink FROM jobs WHERE id=?", (post_id,)).fetchone()
+            item = conn.execute("SELECT account_id, permalink FROM jobs WHERE id=? AND pipeline_id=?", (post_id, row["pipeline_id"])).fetchone()
         else:
-            item = conn.execute("SELECT account_id, permalink FROM manual_tasks WHERE id=?", (post_id,)).fetchone()
+            item = conn.execute("SELECT account_id, permalink FROM manual_tasks WHERE id=? AND pipeline_id=?", (post_id, row["pipeline_id"])).fetchone()
         if item is None:
             conn.execute("""UPDATE analytics_collection_jobs SET status='skipped', error_code='no_post',
                             updated_at=? WHERE id=?""", (_now(), row["id"]))

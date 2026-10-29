@@ -57,3 +57,12 @@ yarn-error.log*
 pnpm-debug.log*
 .vite/
 
+
+# Private task worktrees and SQLite sidecars
+/scratch/
+/release-artifacts/
+*.sqlite3-*
+*.db-*
+
+# Also ignore node_modules when linked into a private worktree
+/frontend/node_modules

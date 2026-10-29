@@ -1,157 +1,85 @@
-"""Xác minh kết quả bài đăng sau khi nhấn nút Đăng.
-
-Không bao giờ kết luận thành công chỉ vì đã nhấn nút. Các kết quả có thể:
-
-* ``published`` — Facebook xác nhận bài đã đăng (thông báo rõ ràng).
-* ``pending_approval`` — Facebook xác nhận bài đang chờ quản trị group duyệt.
-* ``rejected`` — Facebook từ chối bài đăng.
-* ``ambiguous`` — không xác nhận được. Bài **không** được gửi lại, vì có thể
-  đã đăng rồi.
-"""
+"""Observe submission evidence. Closing a composer never proves publication."""
 from __future__ import annotations
 
 import asyncio
-import logging
-from playwright.async_api import Page
+from typing import Any
 
-#: Thông báo Facebook khi bài đã đăng công khai.
-PUBLISHED_NOTICES = (
-    "text=Your post is now published",
-    "text=Bài viết của bạn hiện đã được đăng",
-    "text=Đã đăng bài viết của bạn",
-    "text=Post published",
-)
-#: Thông báo Facebook khi bài đang chờ quản trị group duyệt.
-PENDING_NOTICES = (
-    "text=Sent for approval",
-    "text=Đã gửi để phê duyệt",
-    "text=Đang chờ quản trị viên duyệt",
-    "text=Đang chờ duyệt",
-    "text=Đã gửi để duyệt",
-)
-#: Thông báo Facebook khi bài bị từ chối.
-REJECTED_NOTICES = (
-    "text=You can't post in this group",
-    "text=Bạn không thể đăng bài trong nhóm này",
-    "text=Your post was rejected",
-    "text=Bài viết của bạn đã bị từ chối",
-)
+from services.facebook_selectors import current_registry
 
-_LOGGER = logging.getLogger(__name__)
 
-async def _first_notice_visible(page: Page, notices: tuple[str, ...]) -> bool:
-    for selector in notices:
-        try:
-            target = page.locator(selector).first
-            await target.wait_for(state="visible", timeout=2500)
-            return True
-        except Exception:
-            continue
-    return False
+def notice_target(page: Any, selector: str) -> Any:
+    return page.locator(selector).and_(current_registry().all(page, 'notice_scope'))
 
-async def wait_post_outcome(page: Page, body: str = "") -> dict:
-    """Quan sát kết quả thật sau khi bấm Đăng.
 
-    Trả về dict có ``state`` (published/pending_approval/rejected/ambiguous),
-    ``details`` và ``permalink``. Không có kết quả nào được rút ra từ việc đã
-    bấm nút. Hộp thoại đóng KHÔNG tự động nghĩa là bài đã đăng.
+async def visible_notices(page: Any) -> set[str]:
+    visible = set()
+    for selector in sum((current_registry().notices[key] for key in ('published','pending','rejected')), []):
+        target = notice_target(page, selector)
+        if await target.count() and await target.first.is_visible():
+            visible.add(selector)
+    return visible
 
-    Quan sát đồng thời các trạng thái PUBLISHED/PENDING/REJECTED để không bỏ lỡ
-    thông báo xuất hiện ngắn. Quan sát bắt đầu trước hoặc đồng thời với Submit.
+
+async def wait_post_outcome(page: Any, body: str = '', *, timeout: int = 15000,
+                            prior_notices: set[str] | None = None) -> dict:
+    """Watch all labels concurrently; an absent label cannot cancel a later one.
+
+    Caller must start this before Submit. A published notice is only a signal:
+    the runner also requires a new content-matched Group permalink for POSTED.
     """
-    outcome = {"state": "ambiguous", "details": "", "permalink": ""}
-    
-    # Tạo các task quan sát đồng thời
-    async def watch_notices(notices: tuple[str, ...], state: str, details: str):
-        for selector in notices:
-            try:
-                target = page.locator(selector).first
-                await target.wait_for(state="visible", timeout=2500)
-                return {"state": state, "details": details}
-            except Exception:
-                continue
-        return None
-    
-    # Khởi động quan sát đồng thời trước khi/dồng thời với Submit
-    published_task = asyncio.create_task(watch_notices(PUBLISHED_NOTICES, "published", "Facebook xác nhận bài đã đăng."))
-    pending_task = asyncio.create_task(watch_notices(PENDING_NOTICES, "pending_approval", "Facebook đã nhận bài và đang chờ quản trị group duyệt."))
-    rejected_task = asyncio.create_task(watch_notices(REJECTED_NOTICES, "rejected", "Facebook từ chối bài đăng trong group này."))
-    
-    # Chờ kết quả từ bất kỳ task nào hoàn thành trước
-    done, pending = await asyncio.wait(
-        [published_task, pending_task, rejected_task],
-        return_when=asyncio.FIRST_COMPLETED,
-        timeout=15000  # Timeout chung hợp lý
-    )
-    
-    # Hủy các task còn lại
-    for task in pending:
-        task.cancel()
+    async def watch(selector: str, state: str) -> dict | None:
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    
-    # Xử lý kết quả
-    for task in done:
-        try:
-            result = task.result()
-            if result:
-                return result
-        except asyncio.CancelledError:
-            pass
+            if selector in (prior_notices or set()):
+                return None
+            target = notice_target(page, selector)
+            await target.first.wait_for(state='visible', timeout=timeout)
+            return {'state': state, 'details': {
+                'published': 'Facebook hiển thị thông báo đã đăng; cần đối chiếu bài viết.',
+                'pending_approval': 'Facebook đã nhận bài và đang chờ quản trị group duyệt.',
+                'rejected': 'Facebook từ chối bài đăng trong group này.',
+            }[state], 'permalink': ''}
         except Exception:
-            pass
-    
-    # Không có notice rõ ràng -> quan sát dialog đóng (KHÔNG = published)
+            return None
+
+    tasks = [asyncio.create_task(watch(selector, state))
+             for selectors, state in ((current_registry().notices['published'], 'published'),
+                                      (current_registry().notices['pending'], 'pending_approval'),
+                                      (current_registry().notices['rejected'], 'rejected')) for selector in selectors]
     try:
-        dialog = page.get_by_role("dialog").last
-        await dialog.wait_for(state="hidden", timeout=12000)
-        return {"state": "ambiguous", "details": ("Hộp thoại tạo bài đã đóng nhưng không có thông báo xác nhận; "
-                              "kết quả không xác định, không tự gửi lại."), "permalink": ""}
-    except Exception:
-        return {"state": "ambiguous", "details": ("Không xác nhận được kết quả sau khi bấm Đăng; "
-                              "không tự gửi lại để tránh đăng trùng."), "permalink": ""}
+        for future in asyncio.as_completed(tasks, timeout=timeout / 1000):
+            outcome = await future
+            if outcome:
+                return outcome
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return {'state': 'ambiguous', 'details': 'Chưa xác minh được kết quả; không tự gửi lại để tránh đăng trùng.',
+            'permalink': ''}
 
 
-async def newest_permalink(page: Page, body: str = "") -> str:
-    """Liên kết của bài vừa viết, khi trang hiển thị nó.
+async def group_post_links(page: Any) -> list[str]:
+    """Snapshot links before Submit so old posts cannot verify this attempt."""
+    return await current_registry().all(page, 'links').evaluate_all("""links => links.map(a => a.href)
+        .filter(h => /\\/groups\\/[^/]+\\/(posts|permalink|pending_posts)\\//.test(h))""")
 
-    Chỉ tìm liên kết trong ngữ cảnh Group (feed, timeline, articles).
-    Không lấy liên kết từ profile cá nhân, sidebar, header, v.v.
-    Nếu không tìm thấy link khớp nội dung trong Group, trả về rỗng.
-    """
-    try:
-        result = await page.evaluate("""(body) => {
-            const wanted = (body || '').trim();
-            if (!wanted) return '';
-            
-            // Chỉ tìm trong vùng nội dung chính của Group (feed, timeline)
-            const mainContent = document.querySelector('[role="main"], [data-pagelet="FeedUnit_0"], [role="feed"], div[data-pagelet^="FeedUnit"]');
-            if (!mainContent) return '';
-            
-            const linksInScope = [...mainContent.querySelectorAll('a[href]')];
-            const post = (link) => {
-                const href = link.getAttribute('href') || '';
-                if (!href.includes('/posts/') && !href.includes('/permalink/')) return '';
-                return href.startsWith('http') ? href : new URL(href, location.origin).href;
-            };
-            
-            // Tìm link khớp nội dung caption (ưu tiên bài mới - thường ở đầu)
-            for (const link of [...linksInScope].reverse()) {
-                const href = post(link);
-                if (!href) continue;
-                const holder = link.closest('[data-testid="post_message"], [role="article"], article, [data-pagelet^="FeedUnit"]') || link.parentElement;
-                if (!holder) continue;
-                const text = holder.innerText || '';
-                if (text.includes(wanted.slice(0, 80))) {
-                    return href;
-                }
-            }
-            // Không tìm thấy bài khớp nội dung -> trả rỗng (KHÔNG fallback)
-            return '';
-        }""", body)
-    except Exception as e:
-        _LOGGER.warning("newest_permalink failed: %s", e)
-        return ""
-    return result
+
+async def newest_permalink(page: Any, body: str = '', *, expected_group: str = '',
+                           exclude: list[str] | None = None, expected_image=None,
+                           submitted_at: float | None = None, expected_identity: str = '') -> str:
+    """Compatibility adapter; missing target evidence intentionally returns no URL."""
+    from services.post_evidence import verify_post
+    evidence = await verify_post(page, body, expected_group=expected_group,
+        expected_image=expected_image, submitted_at=submitted_at,
+        expected_identity=expected_identity, exclude=exclude)
+    return evidence['permalink']
+
+
+def __getattr__(name):
+    """Legacy exports resolve through the pinned registry, not a second rule set."""
+    mapping = {'PUBLISHED_NOTICES':'published', 'PENDING_NOTICES':'pending', 'REJECTED_NOTICES':'rejected'}
+    if name in mapping:
+        return tuple(current_registry().notices[mapping[name]])
+    raise AttributeError(name)

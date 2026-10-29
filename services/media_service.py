@@ -74,16 +74,15 @@ def album_bytes(conn, row, base: Path, key: str = "") -> bytes | None:
 # --- trạng thái ---------------------------------------------------------------
 
 def media_payload(row) -> dict:
-    """Dạng API của một ảnh trong Album."""
+    """Dạng API của một ảnh trong Album. Internal technical fields
+    (storage_key, sha256, signature, raw safety_json) are stripped so
+    end users never see server-side file paths, hash values, or provider
+    error internals. Detailed diagnostics remain in the database."""
     item = dict(row)
     try:
         item["tags"] = json.loads(item.get("tags_json") or "[]")
     except (TypeError, ValueError):
         item["tags"] = []
-    try:
-        item["safety"] = json.loads(item.get("safety_json") or "{}")
-    except (TypeError, ValueError):
-        item["safety"] = {}
     item["usable"] = bool(item.get("usable"))
     item["locked"] = bool(item.get("locked"))
     item["saved"] = bool(item.get("saved"))
@@ -94,6 +93,12 @@ def media_payload(row) -> dict:
     item["reason"] = media_status.reason_of(item)
     item["can_retry"] = media_status.can_retry(state)
     item["can_be_usable"] = media_status.can_be_usable(state)
+    # Strip internal technical fields from user-facing response.
+    item.pop("storage_key", None)
+    item.pop("sha256", None)
+    item.pop("signature", None)
+    item.pop("safety_json", None)
+    item.pop("tags_json", None)
     return item
 
 
@@ -126,8 +131,10 @@ def apply_result(ctx: MediaContext, record: dict, outcome: dict) -> None:
     usable = 1 if status == media_status.SAFETY_PASS else 0
     analysis = media_status.ANALYSIS_DONE
     if status not in (media_status.SAFETY_PASS, media_status.SAFETY_REVIEW,
-                      media_status.SAFETY_BLOCKED):
+                      media_status.SAFETY_BLOCKED, media_status.SAFETY_UNKNOWN):
         analysis = media_status.ANALYSIS_ERROR
+    if status == media_status.SAFETY_UNKNOWN and not outcome.get("checked"):
+        analysis = media_status.ANALYSIS_QUEUED
     tags = outcome.get("tags") or []
     stamp = ctx.iso()
     with ctx.db() as conn:
@@ -148,8 +155,8 @@ def apply_result(ctx: MediaContext, record: dict, outcome: dict) -> None:
                      (record["id"], record["pipeline_id"], status,
                       outcome.get("description", ""), json.dumps(tags, ensure_ascii=False),
                       outcome.get("risk", "none"),
-                      json.dumps([outcome.get("note", ""), outcome.get("category", "")],
-                                 ensure_ascii=False),
+                      json.dumps([outcome.get("note", ""), outcome.get("category", ""),
+                                  outcome.get("evidence", "")], ensure_ascii=False),
                       outcome.get("model_version", ""), stamp, stamp))
 
 

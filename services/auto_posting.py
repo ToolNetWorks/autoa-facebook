@@ -57,6 +57,9 @@ def eligible_groups(groups: list[dict], account_id: int | None = None,
                 allowed = [item for item in allowed if item == int(account_id)]
             if not allowed:
                 continue
+            item = dict(group)
+            item["eligible_account_ids"] = allowed
+            result.append(item)
         else:
             if not first_post:
                 if group.get("screening_status") not in group_verification.AUTO_POSTABLE_STATUSES:
@@ -67,7 +70,7 @@ def eligible_groups(groups: list[dict], account_id: int | None = None,
                 continue
             if account_id is not None and group.get("account_id") != account_id:
                 continue
-        result.append(group)
+            result.append(group)
     result.sort(key=lambda item: (0 if item.get("screening_status") == group_verification.VERIFIED_POSTED
                                   else 1, item.get("id", 0)))
     return result

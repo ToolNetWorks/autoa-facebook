@@ -62,12 +62,12 @@ def test_a_shared_group_link_and_its_numeric_form_are_the_same_group(client):
     pipeline = make_pipeline(client, '@grp2b')
     account = make_account(client, pipeline)
     shared = add_group(client, pipeline, account,
-                       url="https://www.facebook.com/share/g/19XXY4GjsM/?mibextid=wwXIfr")
+                       url="https://www.facebook.com/share/g/FixtureShareAb12/?mibextid=wwXIfr")
     assert shared.status_code == 201, shared.text
-    assert shared.json()['url'] == 'https://www.facebook.com/groups/19XXY4GjsM/'
+    assert shared.json()['url'] == 'https://www.facebook.com/share/g/FixtureShareAb12/'
     numeric = add_group(client, pipeline, account, url=(
-        "https://www.facebook.com/groups/2591242354484903/?ref=share&mibextid=wwXIfr"
-        "&share_url=https%3A%2F%2Fwww.facebook.com%2Fshare%2Fg%2F19XXY4GjsM%2F"))
+        "https://www.facebook.com/groups/1234567890123456/?ref=share&mibextid=wwXIfr"
+        "&share_url=https%3A%2F%2Fwww.facebook.com%2Fshare%2Fg%2FFixtureShareAb12%2F"))
     assert numeric.status_code == 409
     assert len(client.get(f'/api/pipelines/{pipeline}/groups').json()) == 1
 

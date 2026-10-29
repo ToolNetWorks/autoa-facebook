@@ -1,0 +1,89 @@
+{
+  "version": "v1",
+  "profiles": {
+    "desktop": {
+      "composer": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Bạn đang nghĩ gì|Bạn viết gì|Viết gì đó|Hãy viết gì đó|Tạo bài viết",
+            "en": "Write something|What's on your mind|Create post"
+          }
+        },
+        {
+          "css": "[role='button'][aria-label='Tạo bài viết'], [role='button'][aria-label='Create post']"
+        }
+      ],
+      "editor": [
+        {
+          "css": "[contenteditable='true'][role='textbox']"
+        },
+        {
+          "css": "[contenteditable='true']"
+        }
+      ],
+      "publish": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Đăng|Gửi|Đăng bài",
+            "en": "Post|Send|Publish"
+          }
+        }
+      ],
+      "media": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Ảnh/video|Ảnh / Video|Ảnh|Chọn ảnh|Chọn từ máy tính",
+            "en": "Photo/video|Photos/videos|Photo|Photos|Attach a photo or video|Upload photos?"
+          }
+        }
+      ],
+      "file_input": [
+        {
+          "css": "input[type='file'][accept*='image'], input[type='file'][accept*='.jpg'], input[type='file'][accept*='.png']"
+        },
+        {
+          "css": "input[type='file']:not([accept]), input[type='file'][accept='']"
+        }
+      ],
+      "preview": [
+        {
+          "css": "img[src^='blob:'], img[src^='data:image/']"
+        }
+      ],
+      "remove_photo": [
+        {
+          "role": "button",
+          "names": {
+            "vi": "Xóa ảnh|Gỡ ảnh",
+            "en": "Remove photo|Remove image"
+          }
+        }
+      ],
+      "anonymous_composer": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Bài viết ẩn danh|Đăng ẩn danh",
+            "en": "Anonymous post|Post anonymously"
+          }
+        }
+      ],
+      "anonymous_notice_continue": [
+        {
+          "role": "button",
+          "exact": true,
+          "names": {
+            "vi": "Tạo bài viết ẩn danh|OK|Đồng ý|Đã hiểu|Tôi hiểu",
+            "en": "Create anonymous post|OK|Got it"
+          }
+        }
+      ]
+    }
+  }
+}

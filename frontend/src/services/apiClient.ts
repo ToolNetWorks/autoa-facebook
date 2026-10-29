@@ -42,7 +42,12 @@ const TRANSLATED: Record<string, string> = {
  * short sentence instead of being shown as it is.
  */
 function friendlyMessage(status: number, detail: unknown): string {
-  if (typeof detail === 'string' && detail.trim()) {
+  if (typeof detail === 'object' && detail !== null && 'code' in detail) {
+    const code = (detail as { code?: string }).code;
+    if (code === 'PIPELINE_MEMBERSHIP_CONFLICT') return 'Workspace có phân công CTV xung đột. Vui lòng liên hệ quản trị viên.';
+    if (code === 'POST_EVIDENCE_REQUIRED') return 'Chưa có bằng chứng xác minh bài đã đăng.';
+  }
+  if (typeof detail === 'string'  && detail.trim()) {
     return TRANSLATED[detail] ?? detail;
   }
   if (Array.isArray(detail) && detail.length > 0) {
